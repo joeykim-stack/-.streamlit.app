@@ -3,3 +3,4 @@ requests
 plotly
 matplotlib
 jinja2
+xlsxwriter
