@@ -9,7 +9,7 @@ from plotly.subplots import make_subplots
 from datetime import datetime
 
 # 1. 페이지 설정
-st.set_page_config(page_title="Procurement Dashboard v6.4", layout="wide")
+st.set_page_config(page_title="Procurement Dashboard v6.5", layout="wide")
 
 # 스타일 설정
 st.markdown("""
@@ -106,10 +106,9 @@ def to_excel(df):
     return output.getvalue()
 
 # --- 화면 출력부 ---
-st.markdown(f'<div class="sticky-header"><h1 style="margin: 0;">🏆 통합 조달 전략 분석 대시보드 v6.4</h1></div>', unsafe_allow_html=True)
+st.markdown(f'<div class="sticky-header"><h1 style="margin: 0;">🏆 통합 조달 전략 분석 대시보드 v6.5</h1></div>', unsafe_allow_html=True)
 
 if not df_raw.empty:
-    # [사이드바]
     st.sidebar.header("🔍 분석 필터")
     all_cats = sorted(df_raw['물품분류명'].unique())
     for c in all_cats:
@@ -135,14 +134,14 @@ if not df_raw.empty:
 
     if df_f.empty: st.info("👈 왼쪽에서 분석할 품목을 선택해 주세요.")
     else:
-        # [KPI 카드]
+        # KPI 카드
         t_amt, t_cnt = df_f['금액'].sum(), df_f['건수'].sum()
         k1, k2, k3 = st.columns(3)
         k1.metric("총 납품 실적", f"{int(t_amt/1000000):,} 백만 원")
         k2.metric("총 계약 건수", f"{int(t_cnt):,} 건")
         k3.metric("건당 평균가", f"{int(t_amt/t_cnt/10000) if t_cnt > 0 else 0:,} 만 원")
 
-        # [월별 트렌드 차트]
+        # 트렌드 차트
         st.markdown("### 📊 월별 매출 및 계약 건수 트렌드")
         trend = df_f.groupby('월').agg({'금액':'sum', '건수':'sum'}).reindex(["1월", "2월", "3월", "4월"]).fillna(0).reset_index()
         fig_trend = make_subplots(specs=[[{"secondary_y": True}]])
@@ -151,7 +150,7 @@ if not df_raw.empty:
         fig_trend.update_layout(margin=dict(l=0, r=0, b=0, t=30), height=300, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1), plot_bgcolor='rgba(0,0,0,0)')
         st.plotly_chart(fig_trend, use_container_width=True)
 
-        # 🚨 [복구 포인트] 기간별 점유율 분석 (원형 그래프)
+        # 기간별 점유율 분석
         st.markdown("---")
         st.markdown("### 💎 기간별 점유율 분석")
         selected_period = st.selectbox("📅 분석 기간 선택", ["전체합계", "1분기 (1~3월)", "1월", "2월", "3월", "4월"])
@@ -171,7 +170,7 @@ if not df_raw.empty:
                 fig_p2.update_layout(margin=dict(t=30, b=10, l=10, r=10), showlegend=False, title=f"품목별 매출 비중 ({selected_period})")
                 st.plotly_chart(fig_p2, use_container_width=True)
 
-        # [상세 실적 표]
+        # 상세 실적 표
         st.markdown("---")
         t_col1, t_col2 = st.columns([5, 1])
         with t_col1: st.subheader("📑 상세 실적 통계 (업체별 순위)")
@@ -179,7 +178,6 @@ if not df_raw.empty:
         pivot_amt = df_f.pivot_table(index='업체명', columns='월', values='금액', aggfunc='sum', fill_value=0)
         show_cnt = st.checkbox("📊 월별 계약건수 함께 보기 (체크 해제 시 금액만 표시)", value=False)
         
-        # 컬럼 재배치
         display_df = pd.DataFrame(index=pivot_amt.index)
         for m in ["1월", "2월", "3월"]:
             if m in pivot_amt.columns:
@@ -196,19 +194,26 @@ if not df_raw.empty:
 
         with t_col2:
             excel_data = to_excel(display_df)
-            st.download_button(label="🟢 엑셀 내보내기", data=excel_data, file_name=f"조달실적_v6.4_{datetime.now().strftime('%Y%m%d')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            st.download_button(label="🟢 엑셀 내보내기", data=excel_data, file_name=f"조달실적_v6.5_{datetime.now().strftime('%Y%m%d')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-        # 스타일링 함수
+        # 🚨 [컬럼 색상 함수] 업체명 컬러 추가
         def style_table(df):
             styler = df.style.apply(lambda r: ['font-weight: bold' if r.name < 20 else ''] * len(r), axis=1)
-            col_styles = {'No.': '#f8f9fa', '1분기 합계': '#fff9db', '4월(액)': '#ebfbee', '전체 총액': '#e7f5ff'}
+            # 업체명(#eef2ff), 순위(#f8f9fa), 1분기합계(#fff9db), 4월(#ebfbee), 총액(#e7f5ff)
+            col_styles = {
+                'No.': '#f8f9fa', 
+                '업체명': '#eef2ff', 
+                '1분기 합계': '#fff9db', 
+                '4월(액)': '#ebfbee', 
+                '전체 총액': '#e7f5ff'
+            }
             for col, color in col_styles.items():
                 if col in df.columns:
                     styler = styler.set_properties(subset=[col], **{'background-color': color})
             return styler
 
         format_dict = {col: "{:,.0f}원" for col in display_df.columns if "(액)" in col or "합계" in col or "총액" in col}
-        format_dict['No.'] = "{}"
+        format_dict['No.'] = "{}"; format_dict['업체명'] = "{}"
         
         styled_df = style_table(display_df).format(format_dict).background_gradient(cmap='YlGnBu', subset=['전체 총액'])
         st.dataframe(styled_df, hide_index=True, column_config={"No.": st.column_config.NumberColumn("No.", width=40)}, use_container_width=True, height=600)
