@@ -9,7 +9,7 @@ from plotly.subplots import make_subplots
 from datetime import datetime
 
 # 1. 페이지 설정
-st.set_page_config(page_title="Procurement Dashboard v6.3", layout="wide")
+st.set_page_config(page_title="Procurement Dashboard v6.4", layout="wide")
 
 # 스타일 설정
 st.markdown("""
@@ -30,7 +30,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- 🎯 [정밀 매칭] 중찬이가 준 52개 업체 리스트 ---
+# --- 🎯 [정밀 매칭] 52개 업체 리스트 ---
 TARGET_COMPANIES = [
     "주식회사 티제이원", "주식회사 파로스", "주식회사 포딕스시스템", "주식회사 세오", 
     "주식회사 펜타게이트", "주식회사 홍석", "주식회사 솔디아", "주식회사 디라직", 
@@ -65,7 +65,6 @@ def fetch_api_data():
                 df_api.columns = ['업체명', '물품분류명', '금액', '계약유형']
                 df_api['금액'] = pd.to_numeric(df_api['금액'], errors='coerce').fillna(0)
                 df_api['월'] = "4월"; df_api['건수'] = 1
-                # 공백 제거 후 화이트리스트 필터링
                 df_api['업체명'] = df_api['업체명'].astype(str).str.strip()
                 return df_api[df_api['업체명'].isin(TARGET_COMPANIES)], f"연동 성공 (신규 {len(df_api)}건)"
     except: pass
@@ -92,7 +91,6 @@ def load_data():
                     tmp['물품분류명'] = df[c_item].astype(str).str.strip() if c_item else "기타"
                     tmp['계약유형'] = df[c_method].astype(str).str.strip() if c_method else "일반"
                     tmp['월'] = month; tmp['건수'] = 1
-                    # 🚨 화이트리스트 필터링
                     all_dfs.append(tmp[tmp['업체명'].isin(TARGET_COMPANIES)])
             except: continue
     df_api, status = fetch_api_data()
@@ -101,8 +99,6 @@ def load_data():
 
 df_raw, api_status = load_data()
 
-# 🚨 [중요] 이전 버전의 블랙리스트 필터(~str.contains)는 이제 완전히 제거했습니다.
-
 def to_excel(df):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
@@ -110,9 +106,10 @@ def to_excel(df):
     return output.getvalue()
 
 # --- 화면 출력부 ---
-st.markdown(f'<div class="sticky-header"><h1 style="margin: 0;">🏆 통합 조달 전략 분석 대시보드 v6.3</h1></div>', unsafe_allow_html=True)
+st.markdown(f'<div class="sticky-header"><h1 style="margin: 0;">🏆 통합 조달 전략 분석 대시보드 v6.4</h1></div>', unsafe_allow_html=True)
 
 if not df_raw.empty:
+    # [사이드바]
     st.sidebar.header("🔍 분석 필터")
     all_cats = sorted(df_raw['물품분류명'].unique())
     for c in all_cats:
@@ -138,14 +135,14 @@ if not df_raw.empty:
 
     if df_f.empty: st.info("👈 왼쪽에서 분석할 품목을 선택해 주세요.")
     else:
-        # KPI
+        # [KPI 카드]
         t_amt, t_cnt = df_f['금액'].sum(), df_f['건수'].sum()
         k1, k2, k3 = st.columns(3)
         k1.metric("총 납품 실적", f"{int(t_amt/1000000):,} 백만 원")
         k2.metric("총 계약 건수", f"{int(t_cnt):,} 건")
         k3.metric("건당 평균가", f"{int(t_amt/t_cnt/10000) if t_cnt > 0 else 0:,} 만 원")
 
-        # 월별 트렌드
+        # [월별 트렌드 차트]
         st.markdown("### 📊 월별 매출 및 계약 건수 트렌드")
         trend = df_f.groupby('월').agg({'금액':'sum', '건수':'sum'}).reindex(["1월", "2월", "3월", "4월"]).fillna(0).reset_index()
         fig_trend = make_subplots(specs=[[{"secondary_y": True}]])
@@ -154,7 +151,27 @@ if not df_raw.empty:
         fig_trend.update_layout(margin=dict(l=0, r=0, b=0, t=30), height=300, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1), plot_bgcolor='rgba(0,0,0,0)')
         st.plotly_chart(fig_trend, use_container_width=True)
 
-        # 상세 실적 표
+        # 🚨 [복구 포인트] 기간별 점유율 분석 (원형 그래프)
+        st.markdown("---")
+        st.markdown("### 💎 기간별 점유율 분석")
+        selected_period = st.selectbox("📅 분석 기간 선택", ["전체합계", "1분기 (1~3월)", "1월", "2월", "3월", "4월"])
+        df_pie = df_f if selected_period == "전체합계" else df_f[df_f['월'].isin(["1월", "2월", "3월"])] if selected_period == "1분기 (1~3월)" else df_f[df_f['월'] == selected_period]
+
+        pl, pr = st.columns(2)
+        with pl:
+            comp_data = df_pie.groupby('업체명')['금액'].sum().sort_values(ascending=False).head(10)
+            if not comp_data.empty:
+                fig_p1 = go.Figure(data=[go.Pie(labels=comp_data.index, values=comp_data.values, hole=0.45, pull=[0.12 if i==0 else 0 for i in range(len(comp_data))], textinfo='percent+label', marker=dict(line=dict(color='#ffffff', width=2), colors=px.colors.sequential.Agsunset))])
+                fig_p1.update_layout(margin=dict(t=30, b=10, l=10, r=10), showlegend=False, title=f"Top 10 업체 점유율 ({selected_period})")
+                st.plotly_chart(fig_p1, use_container_width=True)
+        with pr:
+            cat_data = df_pie.groupby('물품분류명')['금액'].sum().sort_values(ascending=False)
+            if not cat_data.empty:
+                fig_p2 = go.Figure(data=[go.Pie(labels=cat_data.index, values=cat_data.values, hole=0.45, pull=[0.12 if i==0 else 0 for i in range(len(cat_data))], textinfo='percent+label', marker=dict(line=dict(color='#ffffff', width=2), colors=px.colors.sequential.Tealgrn))])
+                fig_p2.update_layout(margin=dict(t=30, b=10, l=10, r=10), showlegend=False, title=f"품목별 매출 비중 ({selected_period})")
+                st.plotly_chart(fig_p2, use_container_width=True)
+
+        # [상세 실적 표]
         st.markdown("---")
         t_col1, t_col2 = st.columns([5, 1])
         with t_col1: st.subheader("📑 상세 실적 통계 (업체별 순위)")
@@ -179,7 +196,7 @@ if not df_raw.empty:
 
         with t_col2:
             excel_data = to_excel(display_df)
-            st.download_button(label="🟢 엑셀 내보내기", data=excel_data, file_name=f"조달실적_v6.3_{datetime.now().strftime('%Y%m%d')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            st.download_button(label="🟢 엑셀 내보내기", data=excel_data, file_name=f"조달실적_v6.4_{datetime.now().strftime('%Y%m%d')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
         # 스타일링 함수
         def style_table(df):
