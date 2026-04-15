@@ -6,7 +6,7 @@ import plotly.express as px
 from datetime import datetime, timedelta
 
 # 1. 페이지 설정 및 디자인
-st.set_page_config(page_title="Procurement Dashboard v4.2", layout="wide")
+st.set_page_config(page_title="Procurement Dashboard v4.3", layout="wide")
 
 st.markdown("""
     <style>
@@ -102,7 +102,7 @@ if not df_raw.empty:
     df_f = df_raw[(df_raw['물품분류명'].isin(selected_k)) & (df_raw['계약유형'].isin(selected_r))]
 
     # --- 4. 메인 화면 구성 ---
-    st.title("🏆 통합 조달 전략 분석 대시보드 v4.2")
+    st.title("🏆 통합 조달 전략 분석 대시보드 v4.3")
     
     if df_f.empty:
         st.info("왼쪽 필터에서 품목을 선택해 주세요.")
@@ -130,17 +130,15 @@ if not df_raw.empty:
             cat_data = df_f.groupby('물품분류명')['금액'].sum()
             st.plotly_chart(px.pie(cat_data, values=cat_data.values, names=cat_data.index, hole=0.4, color_discrete_sequence=px.colors.sequential.Blues_r), use_container_width=True)
 
-        # [상세 데이터 표 - v4.2 건수 토글 추가]
+        # [상세 데이터 표]
         st.markdown("---")
         st.subheader("📑 상세 실적 통계")
         
-        # 건수 표시 여부 체크박스
         show_cnt = st.checkbox("📊 월별 계약건수 함께 보기", value=False)
         
         pivot_amt = df_f.pivot_table(index='업체명', columns='월', values='금액', aggfunc='sum', fill_value=0)
         pivot_cnt = df_f.pivot_table(index='업체명', columns='월', values='건수', aggfunc='sum', fill_value=0)
         
-        # 표시할 결과 데이터프레임 구성
         display_df = pd.DataFrame(index=pivot_amt.index)
         for m in ["1월", "2월", "3월", "4월"]:
             if m in pivot_amt.columns:
@@ -148,16 +146,16 @@ if not df_raw.empty:
                 if show_cnt:
                     display_df[f"{m}(건)"] = pivot_cnt[m]
         
-        # 합계 계산
         display_df['1분기 합계'] = pivot_amt.get(["1월", "2월", "3월"], pd.DataFrame()).sum(axis=1)
         display_df['전체 총액'] = pivot_amt.sum(axis=1)
-        
-        # 표 출력
+
+        # 🚨 [서식 수정 포인트] 컬럼명에 따라 '원' 또는 '건'을 다르게 붙임
+        def format_columns(val, col_name):
+            if "(건)" in col_name:
+                return f"{int(val):,}건"
+            else:
+                return f"{int(val):,}원"
+
+        # 컬럼별로 서식 적용
         st.dataframe(
-            display_df.sort_values('전체 총액', ascending=False)
-            .style.format("{:,.0f}원")
-            .background_gradient(cmap='YlGnBu', subset=['전체 총액']), 
-            use_container_width=True
-        )
-else:
-    st.error("데이터 로드 실패. 파일을 확인해 주세요.")
+            display_df.sort_
