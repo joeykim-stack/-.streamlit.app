@@ -6,14 +6,13 @@ import plotly.express as px
 from datetime import datetime, timedelta
 
 # 1. 페이지 설정 및 디자인
-st.set_page_config(page_title="Procurement Dashboard v4.1", layout="wide")
+st.set_page_config(page_title="Procurement Dashboard v4.2", layout="wide")
 
 st.markdown("""
     <style>
     .main { background-color: #f8f9fa; }
     .stMetric { background-color: #ffffff; padding: 20px; border-radius: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
     h1, h2, h3 { color: #1e3a8a; font-family: 'Nanum Gothic', sans-serif; }
-    /* 사이드바 체크박스 간격 조절 */
     .stCheckbox { margin-bottom: -10px; }
     </style>
 """, unsafe_allow_html=True)
@@ -73,14 +72,11 @@ def load_data():
 
 df_raw, api_status = load_data()
 
-# --- 3. 사이드바 필터 로직 (요청 사항 반영) ---
+# --- 3. 사이드바 필터 로직 ---
 if not df_raw.empty:
     st.sidebar.header("🔍 분석 필터")
-    
-    # [품목 분류 필터]
     all_categories = sorted(df_raw['물품분류명'].unique())
     
-    # 전체 선택 로직
     if "selected_k" not in st.session_state:
         st.session_state.selected_k = all_categories
 
@@ -90,46 +86,40 @@ if not df_raw.empty:
     st.sidebar.write("---")
     st.sidebar.subheader("📦 상세 품목 리스트")
     for cat in all_categories:
-        # 마스터 체크박스에 따라 개별 체크박스 상태 결정
-        is_checked = cat in st.session_state.selected_k if not master_k else True
         if st.sidebar.checkbox(cat, value=master_k or cat in st.session_state.selected_k, key=f"cat_{cat}"):
             selected_k.append(cat)
-    
     st.session_state.selected_k = selected_k
 
-    # [계약 유형 필터]
     st.sidebar.write("---")
     unique_r = sorted(df_raw['계약유형'].unique())
     master_r = st.sidebar.checkbox("📄 계약유형 전체 선택", value=True)
     selected_r = [m for m in unique_r if st.sidebar.checkbox(m, value=master_r, key=f"r_{m}")]
     
-    # API 상태 표시
     st.sidebar.write("---")
     if "성공" in api_status: st.sidebar.success("✅ 4월 실시간 연동 중")
     else: st.sidebar.warning(f"⚠️ 4월 연동 대기 ({api_status})")
 
-    # 데이터 필터링
     df_f = df_raw[(df_raw['물품분류명'].isin(selected_k)) & (df_raw['계약유형'].isin(selected_r))]
 
     # --- 4. 메인 화면 구성 ---
-    st.title("🏆 통합 조달 전략 분석 대시보드 v4.1")
+    st.title("🏆 통합 조달 전략 분석 대시보드 v4.2")
     
     if df_f.empty:
         st.info("왼쪽 필터에서 품목을 선택해 주세요.")
     else:
-        # KPI 카드
+        # [KPI 카드]
         t_amt, t_cnt = df_f['금액'].sum(), df_f['건수'].sum()
         c1, c2, c3 = st.columns(3)
         c1.metric("총 납품 실적", f"{int(t_amt/1000000):,} 백만 원")
         c2.metric("총 계약 건수", f"{int(t_cnt):,} 건")
         c3.metric("건당 평균가", f"{int(t_amt/t_cnt/10000) if t_cnt > 0 else 0:,} 만 원")
 
-        # 월별 추이
+        # [월별 추이]
         st.markdown("### 📈 매출 추이 (1~4월)")
         trend = df_f.groupby('월').agg({'금액':'sum'}).reindex(["1월", "2월", "3월", "4월"]).fillna(0).reset_index()
         st.plotly_chart(px.area(trend, x='월', y='금액', color_discrete_sequence=['#1e3a8a']), use_container_width=True)
 
-        # 점유율 분석
+        # [점유율 분석]
         col_l, col_r = st.columns(2)
         with col_l:
             st.write("**Top 10 업체 점유율**")
@@ -140,12 +130,34 @@ if not df_raw.empty:
             cat_data = df_f.groupby('물품분류명')['금액'].sum()
             st.plotly_chart(px.pie(cat_data, values=cat_data.values, names=cat_data.index, hole=0.4, color_discrete_sequence=px.colors.sequential.Blues_r), use_container_width=True)
 
-        # 상세 데이터 표
+        # [상세 데이터 표 - v4.2 건수 토글 추가]
         st.markdown("---")
         st.subheader("📑 상세 실적 통계")
-        pivot = df_f.pivot_table(index='업체명', columns='월', values='금액', aggfunc='sum', fill_value=0)
-        pivot['1분기 합계'] = pivot.get(["1월", "2월", "3월"], pd.DataFrame()).sum(axis=1)
-        pivot['전체 총액'] = pivot.sum(axis=1)
-        st.dataframe(pivot.sort_values('전체 총액', ascending=False).style.format("{:,.0f}원").background_gradient(cmap='YlGnBu', subset=['전체 총액']), use_container_width=True)
+        
+        # 건수 표시 여부 체크박스
+        show_cnt = st.checkbox("📊 월별 계약건수 함께 보기", value=False)
+        
+        pivot_amt = df_f.pivot_table(index='업체명', columns='월', values='금액', aggfunc='sum', fill_value=0)
+        pivot_cnt = df_f.pivot_table(index='업체명', columns='월', values='건수', aggfunc='sum', fill_value=0)
+        
+        # 표시할 결과 데이터프레임 구성
+        display_df = pd.DataFrame(index=pivot_amt.index)
+        for m in ["1월", "2월", "3월", "4월"]:
+            if m in pivot_amt.columns:
+                display_df[f"{m}(액)"] = pivot_amt[m]
+                if show_cnt:
+                    display_df[f"{m}(건)"] = pivot_cnt[m]
+        
+        # 합계 계산
+        display_df['1분기 합계'] = pivot_amt.get(["1월", "2월", "3월"], pd.DataFrame()).sum(axis=1)
+        display_df['전체 총액'] = pivot_amt.sum(axis=1)
+        
+        # 표 출력
+        st.dataframe(
+            display_df.sort_values('전체 총액', ascending=False)
+            .style.format("{:,.0f}원")
+            .background_gradient(cmap='YlGnBu', subset=['전체 총액']), 
+            use_container_width=True
+        )
 else:
     st.error("데이터 로드 실패. 파일을 확인해 주세요.")
