@@ -2,13 +2,14 @@ import streamlit as st
 import pandas as pd
 import requests
 import os
+import io
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from datetime import datetime
 
 # 1. 페이지 설정 및 디자인
-st.set_page_config(page_title="Procurement Dashboard v5.8", layout="wide")
+st.set_page_config(page_title="Procurement Dashboard v6.1", layout="wide")
 
 st.markdown("""
     <style>
@@ -26,24 +27,26 @@ st.markdown("""
         padding: 10px 0 10px 0; border-bottom: 2px solid #e9ecef;
         margin-top: -30px; margin-bottom: 20px;
     }
-    .stDownloadButton > button { width: 100%; color: #1e3a8a; border: 1px solid #1e3a8a; }
+    .stDownloadButton > button { width: 100%; color: #ffffff; background-color: #1d6f42; border: none; font-weight: bold; }
+    .stDownloadButton > button:hover { background-color: #145a32; color: #ffffff; }
     </style>
 """, unsafe_allow_html=True)
 
-# --- 🚨 [정밀 매칭] 52개 업체 화이트리스트 ---
+# --- [정밀 매칭] 52개 업체 리스트 ---
 TARGET_COMPANIES = [
-    "주식회사 마이크로시스템", "주식회사 핀텔", "주식회사 웹게이트", "주식회사 크리에이티브넷",
-    "주식회사 두원전자통신", "주식회사 올인원 코리아(ALL-IN-ONE KOREA CO., LTD.)", "주식회사 티제이원",
-    "(주)앤다스", "(주)지성이엔지", "주식회사 송우인포텍", "렉스젠 주식회사", "비티에스 주식회사",
-    "주식회사 솔디아", "주식회사 홍석", "(주)비엔에스테크", "주식회사 디케이앤트", "주식회사 제이한테크",
-    "주식회사 그린아이티코리아", "주식회사 펜타게이트", "주식회사 한국아이티에스", "미르텍 주식회사",
-    "주식회사 포딕스시스템", "주식회사 명광", "뉴코리아전자통신 주식회사", "주식회사 오티에스",
-    "주식회사 아라드네트웍스", "주식회사 시큐인포", "주식회사센텍", "(주)원우이엔지", "(주)경림이앤지",
-    "주식회사 진명아이앤씨", "주식회사 디라직", "주식회사 알엠텍", "주식회사 아이엔아이", "주식회사 지인테크",
-    "주식회사 다누시스", "에코아이넷(주)", "사이테크놀로지스 주식회사", "주식회사 인텔리빅스", "한국씨텍(주)",
-    "주식회사 아이즈온솔루션", "대신네트웍스주식회사", "주식회사 새움", "이노뎁(주)", "(주)포소드",
-    "주식회사 에스카", "주식회사 제노시스", "주식회사 디지탈라인", "주식회사 세오", "주식회사 포커스에이아이",
-    "주식회사 비알인포텍", "주식회사 파로스"
+    "주식회사 티제이원", "주식회사 파로스", "주식회사 포딕스시스템", "주식회사 세오", 
+    "주식회사 펜타게이트", "주식회사 홍석", "주식회사 솔디아", "주식회사 디라직", 
+    "주식회사 새움", "주식회사 디지탈라인", "주식회사 지인테크", "(주)비엔에스테크", 
+    "주식회사 시큐인포", "주식회사 명광", "주식회사 올인원 코리아(ALL-IN-ONE KOREA CO., LTD.)", 
+    "주식회사 포커스에이아이", "주식회사 한국아이티에스", "(주)앤다스", "주식회사 다누시스", 
+    "이노뎁(주)", "주식회사 핀텔", "주식회사 오티에스", "주식회사 에스카", 
+    "에코아이넷(주)", "미르텍 주식회사", "주식회사 아이즈온솔루션", "주식회사 그린아이티코리아", 
+    "주식회사 제노시스", "(주)지성이엔지", "주식회사 알엠텍", "(주)원우이엔지", 
+    "(주)포소드", "주식회사 두원전자통신", "대신네트웍스주식회사", "주식회사 마이크로시스템", 
+    "주식회사 크리에이티브넷", "주식회사센텍", "(주)경림이앤지", "주식회사 웹게이트", 
+    "한국씨텍(주)", "뉴코리아전자통신 주식회사", "주식회사 제이한테크", "주식회사 아라드네트웍스", 
+    "주식회사 진명아이앤씨", "렉스젠 주식회사", "주식회사 디케이앤트", "사이테크놀로지스 주식회사", 
+    "주식회사 송우인포텍", "주식회사 아이엔아이", "비티에스 주식회사", "주식회사 인텔리빅스", "주식회사 비알인포텍"
 ]
 
 SERVICE_KEY = "c1b3792f-37f0-4d57-897b-3b3614522855"
@@ -64,10 +67,8 @@ def fetch_api_data():
                 df_api.columns = ['업체명', '물품분류명', '금액', '계약유형']
                 df_api['금액'] = pd.to_numeric(df_api['금액'], errors='coerce').fillna(0)
                 df_api['월'] = "4월"; df_api['건수'] = 1
-                # 🎯 정밀 매칭 필터
                 return df_api[df_api['업체명'].isin(TARGET_COMPANIES)], f"연동 성공 (신규 {len(df_api)}건)"
             else: return pd.DataFrame(), "연결 성공: 실적 정산 대기 중"
-        elif res.status_code == 500: return pd.DataFrame(), "조달청 점검 중 (500)"
     except: pass
     return pd.DataFrame(), "실시간 연동 대기"
 
@@ -91,7 +92,6 @@ def load_data():
                     tmp['계약유형'] = df[c_method].astype(str).str.strip()
                     tmp['금액'] = pd.to_numeric(df[c_amt].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
                     tmp['월'] = month; tmp['건수'] = 1
-                    # 🎯 정밀 매칭 필터
                     all_dfs.append(tmp[tmp['업체명'].isin(TARGET_COMPANIES)])
             except: continue
     df_api, status = fetch_api_data()
@@ -100,8 +100,15 @@ def load_data():
 
 df_raw, api_status = load_data()
 
-# --- UI 레이아웃 ---
-st.markdown(f'<div class="sticky-header"><h1 style="margin: 0;">🏆 통합 조달 전략 분석 대시보드 v5.8</h1></div>', unsafe_allow_html=True)
+# --- 엑셀 변환 함수 ---
+def to_excel(df):
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        df.to_excel(writer, index=False, sheet_name='실적통계')
+    return output.getvalue()
+
+# --- 메인 레이아웃 ---
+st.markdown(f'<div class="sticky-header"><h1 style="margin: 0;">🏆 통합 조달 전략 분석 대시보드 v6.1</h1></div>', unsafe_allow_html=True)
 
 if not df_raw.empty:
     st.sidebar.header("🔍 분석 필터")
@@ -143,28 +150,8 @@ if not df_raw.empty:
         fig_trend = make_subplots(specs=[[{"secondary_y": True}]])
         fig_trend.add_trace(go.Bar(x=trend['월'], y=trend['금액'], name="매출액", marker_color='#1e3a8a', opacity=0.85), secondary_y=False)
         fig_trend.add_trace(go.Scatter(x=trend['월'], y=trend['건수'], name="계약건수", mode='lines+markers+text', text=trend['건수'], textposition="top center", textfont=dict(color='#ff7f0e', size=13, family="Arial Black"), line=dict(color='#ff7f0e', width=3), marker=dict(size=8, color='#ff7f0e')), secondary_y=True)
-        fig_trend.update_layout(margin=dict(l=0, r=0, b=0, t=30), height=350, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1), plot_bgcolor='rgba(0,0,0,0)')
+        fig_trend.update_layout(margin=dict(l=0, r=0, b=0, t=30), height=300, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1), plot_bgcolor='rgba(0,0,0,0)')
         st.plotly_chart(fig_trend, use_container_width=True)
-
-        # 점유율 분석
-        st.markdown("---")
-        st.markdown("### 💎 기간별 점유율 분석")
-        selected_period = st.selectbox("📅 분석 기간 선택", ["전체합계", "1분기 (1~3월)", "1월", "2월", "3월", "4월"])
-        df_pie = df_f if selected_period == "전체합계" else df_f[df_f['월'].isin(["1월", "2월", "3월"])] if selected_period == "1분기 (1~3월)" else df_f[df_f['월'] == selected_period]
-
-        pl, pr = st.columns(2)
-        with pl:
-            comp_data = df_pie.groupby('업체명')['금액'].sum().sort_values(ascending=False).head(10)
-            if not comp_data.empty:
-                fig_p1 = go.Figure(data=[go.Pie(labels=comp_data.index, values=comp_data.values, hole=0.45, pull=[0.12 if i==0 else 0 for i in range(len(comp_data))], textinfo='percent+label', marker=dict(line=dict(color='#ffffff', width=2), colors=px.colors.sequential.Agsunset))])
-                fig_p1.update_layout(margin=dict(t=30, b=10, l=10, r=10), showlegend=False, title=f"Top 10 업체 ({selected_period})")
-                st.plotly_chart(fig_p1, use_container_width=True)
-        with pr:
-            cat_data = df_pie.groupby('물품분류명')['금액'].sum().sort_values(ascending=False)
-            if not cat_data.empty:
-                fig_p2 = go.Figure(data=[go.Pie(labels=cat_data.index, values=cat_data.values, hole=0.45, pull=[0.12 if i==0 else 0 for i in range(len(cat_data))], textinfo='percent+label', marker=dict(line=dict(color='#ffffff', width=2), colors=px.colors.sequential.Tealgrn))])
-                fig_p2.update_layout(margin=dict(t=30, b=10, l=10, r=10), showlegend=False, title=f"품목별 비중 ({selected_period})")
-                st.plotly_chart(fig_p2, use_container_width=True)
 
         # 상세 실적 표
         st.markdown("---")
@@ -175,20 +162,32 @@ if not df_raw.empty:
         pivot_cnt = df_f.pivot_table(index='업체명', columns='월', values='건수', aggfunc='sum', fill_value=0)
         show_cnt = st.checkbox("📊 월별 계약건수 함께 보기", value=False)
         
+        # 컬럼 재배치 로직
         display_df = pd.DataFrame(index=pivot_amt.index)
-        for m in ["1월", "2월", "3월", "4월"]:
+        for m in ["1월", "2월", "3월"]:
             if m in pivot_amt.columns:
                 display_df[f"{m}(액)"] = pivot_amt[m]
                 if show_cnt: display_df[f"{m}(건)"] = pivot_cnt[m]
         
         display_df['1분기 합계'] = pivot_amt.get(["1월", "2월", "3월"], pd.DataFrame()).sum(axis=1)
+        
+        if "4월" in pivot_amt.columns:
+            display_df["4월(액)"] = pivot_amt["4월"]
+            if show_cnt: display_df["4월(건)"] = pivot_cnt["4월"]
+            
         display_df['전체 총액'] = pivot_amt.sum(axis=1)
         display_df = display_df.sort_values('전체 총액', ascending=False).reset_index()
         display_df.insert(0, 'No.', range(1, len(display_df) + 1)) 
 
+        # 🚨 [수정 포인트] 엑셀 내보내기 버튼 (초록색 엑셀 스타일 적용)
         with t_col2:
-            csv = display_df.to_csv(index=False).encode('utf-8-sig')
-            st.download_button("💾 CSV 내보내기", data=csv, file_name=f"procurement_rank_{selected_period}.csv", mime='text/csv')
+            excel_data = to_excel(display_df)
+            st.download_button(
+                label="🟢 엑셀 내보내기",
+                data=excel_data,
+                file_name=f"조달실적_분석_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
 
         format_dict = {col: "{:,.0f}건" if '(건)' in col else ("{}" if col in ['No.', '업체명'] else "{:,.0f}원") for col in display_df.columns}
         styled_df = display_df.style.apply(lambda r: ['background-color: #e6f2ff; font-weight: bold' if r.name < 20 else '']*len(r), axis=1).format(format_dict).background_gradient(cmap='YlGnBu', subset=['전체 총액'])
