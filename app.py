@@ -9,7 +9,7 @@ from plotly.subplots import make_subplots
 from datetime import datetime
 
 # 1. 페이지 설정 및 디자인
-st.set_page_config(page_title="Procurement Dashboard v6.1", layout="wide")
+st.set_page_config(page_title="Procurement Dashboard v6.2", layout="wide")
 
 st.markdown("""
     <style>
@@ -100,7 +100,6 @@ def load_data():
 
 df_raw, api_status = load_data()
 
-# --- 엑셀 변환 함수 ---
 def to_excel(df):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
@@ -108,7 +107,7 @@ def to_excel(df):
     return output.getvalue()
 
 # --- 메인 레이아웃 ---
-st.markdown(f'<div class="sticky-header"><h1 style="margin: 0;">🏆 통합 조달 전략 분석 대시보드 v6.1</h1></div>', unsafe_allow_html=True)
+st.markdown(f'<div class="sticky-header"><h1 style="margin: 0;">🏆 통합 조달 전략 분석 대시보드 v6.2</h1></div>', unsafe_allow_html=True)
 
 if not df_raw.empty:
     st.sidebar.header("🔍 분석 필터")
@@ -144,7 +143,7 @@ if not df_raw.empty:
         k2.metric("총 계약 건수", f"{int(t_cnt):,} 건")
         k3.metric("건당 평균가", f"{int(t_amt/t_cnt/10000) if t_cnt > 0 else 0:,} 만 원")
 
-        # 월별 트렌드
+        # 트렌드 차트
         st.markdown("### 📊 월별 매출 및 계약 건수 트렌드")
         trend = df_f.groupby('월').agg({'금액':'sum', '건수':'sum'}).reindex(["1월", "2월", "3월", "4월"]).fillna(0).reset_index()
         fig_trend = make_subplots(specs=[[{"secondary_y": True}]])
@@ -162,7 +161,6 @@ if not df_raw.empty:
         pivot_cnt = df_f.pivot_table(index='업체명', columns='월', values='건수', aggfunc='sum', fill_value=0)
         show_cnt = st.checkbox("📊 월별 계약건수 함께 보기", value=False)
         
-        # 컬럼 재배치 로직
         display_df = pd.DataFrame(index=pivot_amt.index)
         for m in ["1월", "2월", "3월"]:
             if m in pivot_amt.columns:
@@ -179,19 +177,14 @@ if not df_raw.empty:
         display_df = display_df.sort_values('전체 총액', ascending=False).reset_index()
         display_df.insert(0, 'No.', range(1, len(display_df) + 1)) 
 
-        # 🚨 [수정 포인트] 엑셀 내보내기 버튼 (초록색 엑셀 스타일 적용)
         with t_col2:
             excel_data = to_excel(display_df)
-            st.download_button(
-                label="🟢 엑셀 내보내기",
-                data=excel_data,
-                file_name=f"조달실적_분석_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+            st.download_button(label="🟢 엑셀 내보내기", data=excel_data, file_name=f"조달실적_v6.2_{datetime.now().strftime('%Y%m%d')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-        format_dict = {col: "{:,.0f}건" if '(건)' in col else ("{}" if col in ['No.', '업체명'] else "{:,.0f}원") for col in display_df.columns}
-        styled_df = display_df.style.apply(lambda r: ['background-color: #e6f2ff; font-weight: bold' if r.name < 20 else '']*len(r), axis=1).format(format_dict).background_gradient(cmap='YlGnBu', subset=['전체 총액'])
-        
-        st.dataframe(styled_df, hide_index=True, column_config={"No.": st.column_config.NumberColumn("No.", width=40)}, use_container_width=True, height=600)
-else:
-    st.error("데이터 로드 실패. 깃허브 파일을 확인하세요.")
+        # 🚨 [컬럼별 색상 스타일링 함수]
+        def style_table(df):
+            # 기본 스타일: 상위 20개 볼드 처리
+            styler = df.style.apply(lambda r: ['font-weight: bold' if r.name < 20 else ''] * len(r), axis=1)
+            
+            # 컬럼별 배경색 지정
+            col_styles
