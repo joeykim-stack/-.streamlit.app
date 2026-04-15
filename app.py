@@ -6,37 +6,54 @@ import plotly.express as px
 from datetime import datetime, timedelta
 
 # 1. 페이지 설정 및 디자인
-st.set_page_config(page_title="Procurement Dashboard v4.5", layout="wide")
+st.set_page_config(page_title="Procurement Dashboard v4.6", layout="wide")
 
-# [디자인 강화] 타이틀 상단 고정 및 사이드바 폰트 축소 CSS
+# [디자인 강화] 타이틀 완벽 고정 및 사이드바 간격 대폭 축소 CSS
 st.markdown("""
     <style>
+    /* 🚨 1. 타이틀 고정을 위한 스트림릿 기본 컨테이너 스크롤 강제 해제 */
+    .main .block-container {
+        overflow: initial !important;
+        padding-top: 2rem !important;
+    }
+    
     .main { background-color: #f8f9fa; }
     .stMetric { background-color: #ffffff; padding: 20px; border-radius: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
     h1, h2, h3 { color: #1e3a8a; font-family: 'Nanum Gothic', sans-serif; }
     
-    /* 사이드바 체크박스 폰트 크기 축소 */
+    /* 🚨 2. 사이드바 체크박스 높이/간격을 기존의 40% 수준으로 초압축 */
+    section[data-testid="stSidebar"] div[data-testid="stCheckbox"] {
+        margin-top: -12px !important;
+        margin-bottom: -12px !important;
+    }
+    section[data-testid="stSidebar"] label[data-baseweb="checkbox"] {
+        min-height: 20px !important;
+        padding-bottom: 0px !important;
+        margin-bottom: 0px !important;
+    }
     section[data-testid="stSidebar"] .stCheckbox p {
-        font-size: 13px !important;
-        margin-bottom: -5px;
+        font-size: 12.5px !important;
+        line-height: 1 !important;
+        padding-bottom: 0px !important;
     }
     
     /* 사이드바 헤더 간격 조절 */
     section[data-testid="stSidebar"] h2, section[data-testid="stSidebar"] h3 {
-        margin-top: -10px;
+        margin-top: -15px;
+        margin-bottom: 5px;
     }
 
-    /* 🚨 타이틀 상단 고정 (Sticky Header) */
+    /* 🚨 3. 타이틀 상단 찰싹 고정 (Sticky Header) */
     .sticky-header {
         position: -webkit-sticky;
         position: sticky;
-        top: 2.875rem; /* 스트림릿 기본 상단 바 바로 아래에 고정 */
-        background-color: #f8f9fa; /* 뒤에 글자가 비치지 않게 배경색 지정 */
-        z-index: 999;
-        padding: 10px 0 15px 0;
+        top: 2.875rem; /* 상단 바 바로 아래에 고정 */
+        background-color: #f8f9fa; /* 글자 비침 방지용 메인 배경색 */
+        z-index: 9999;
+        padding: 10px 0 10px 0;
         border-bottom: 2px solid #e9ecef;
-        margin-bottom: 20px;
         margin-top: -30px;
+        margin-bottom: 20px;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -97,10 +114,9 @@ def load_data():
 df_raw, api_status = load_data()
 
 # --- 3. 메인 화면 타이틀 (상단 고정 HTML) ---
-# 기존 st.title() 대신 CSS가 적용된 HTML div를 사용합니다.
 st.markdown("""
     <div class="sticky-header">
-        <h1 style="margin: 0; padding: 0;">🏆 통합 조달 전략 분석 대시보드 v4.5</h1>
+        <h1 style="margin: 0; padding: 0;">🏆 통합 조달 전략 분석 대시보드 v4.6</h1>
     </div>
 """, unsafe_allow_html=True)
 
