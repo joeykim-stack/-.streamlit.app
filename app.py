@@ -31,7 +31,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- 🎯 [정밀 매칭] 52개 업체 리스트 ---
+# --- 🎯 [정밀 매칭] 중찬이가 제공한 52개 업체 찐 최종 리스트 ---
 TARGET_COMPANIES = [
     "주식회사 티제이원", "주식회사 파로스", "주식회사 포딕스시스템", "주식회사 세오", 
     "주식회사 펜타게이트", "주식회사 홍석", "주식회사 솔디아", "주식회사 디라직", 
@@ -67,7 +67,9 @@ def fetch_api_data():
                 df_api['금액'] = pd.to_numeric(df_api['금액'], errors='coerce').fillna(0)
                 df_api['월'] = "4월"; df_api['건수'] = 1
                 df_api['업체명'] = df_api['업체명'].astype(str).str.strip()
-                return df_api[df_api['업체명'].isin(TARGET_COMPANIES)], f"연동 성공 (신규 {len(df_api)}건)"
+                filtered_api = df_api[df_api['업체명'].isin(TARGET_COMPANIES)]
+                return filtered_api, f"연동 성공 (신규 {len(filtered_api)}건)"
+            else: return pd.DataFrame(), "연결 성공: 실적 정산 대기 중"
     except: pass
     return pd.DataFrame(), "실시간 데이터 확인 대기"
 
@@ -105,7 +107,7 @@ def to_excel(df):
         df.to_excel(writer, index=False, sheet_name='실적통계')
     return output.getvalue()
 
-# --- 화면 출력 ---
+# --- 화면 출력부 ---
 st.markdown(f'<div class="sticky-header"><h1 style="margin: 0;">🏆 통합 조달 전략 분석 대시보드 v6.6</h1></div>', unsafe_allow_html=True)
 
 if not df_raw.empty:
@@ -119,25 +121,29 @@ if not df_raw.empty:
     if col2.button("❌ 전체 해제"): 
         for c in all_cats: st.session_state[f"cat_{c}"] = False
     selected_k = [c for c in all_cats if st.sidebar.checkbox(c, key=f"cat_{c}")]
+    
     st.sidebar.write("---")
     unique_r = sorted(df_raw['계약유형'].unique())
     master_r = st.sidebar.checkbox("📄 계약유형 전체 선택", value=True)
     selected_r = [m for m in unique_r if st.sidebar.checkbox(m, value=master_r, key=f"r_{m}")]
+    
     st.sidebar.write("---")
-    if "연결 성공" in api_status: st.sidebar.info(f"🟢 {api_status}")
+    if "연결 성공" in api_status or "연동 성공" in api_status: st.sidebar.info(f"🟢 {api_status}")
     else: st.sidebar.warning(f"⚠️ {api_status}")
+    st.sidebar.caption(f"🕒 마지막 확인: {datetime.now().strftime('%H:%M:%S')}")
 
     df_f = df_raw[(df_raw['물품분류명'].isin(selected_k)) & (df_raw['계약유형'].isin(selected_r))]
 
     if df_f.empty: st.info("👈 왼쪽에서 분석할 품목을 선택해 주세요.")
     else:
-        # KPI & Chart 섹션 (동일 유지)
+        # KPI 카드
         t_amt, t_cnt = df_f['금액'].sum(), df_f['건수'].sum()
         k1, k2, k3 = st.columns(3)
         k1.metric("총 납품 실적", f"{int(t_amt/1000000):,} 백만 원")
         k2.metric("총 계약 건수", f"{int(t_cnt):,} 건")
         k3.metric("건당 평균가", f"{int(t_amt/t_cnt/10000) if t_cnt > 0 else 0:,} 만 원")
 
+        # 월별 트렌드
         st.markdown("### 📊 월별 매출 및 계약 건수 트렌드")
         trend = df_f.groupby('월').agg({'금액':'sum', '건수':'sum'}).reindex(["1월", "2월", "3월", "4월"]).fillna(0).reset_index()
         fig_trend = make_subplots(specs=[[{"secondary_y": True}]])
@@ -146,6 +152,7 @@ if not df_raw.empty:
         fig_trend.update_layout(margin=dict(l=0, r=0, b=0, t=30), height=300, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1), plot_bgcolor='rgba(0,0,0,0)')
         st.plotly_chart(fig_trend, use_container_width=True)
 
+        # 점유율 분석
         st.markdown("---")
         st.markdown("### 💎 기간별 점유율 분석")
         selected_period = st.selectbox("📅 분석 기간 선택", ["전체합계", "1분기 (1~3월)", "1월", "2월", "3월", "4월"])
@@ -164,6 +171,7 @@ if not df_raw.empty:
                 fig_p2.update_layout(margin=dict(t=30, b=10, l=10, r=10), showlegend=False, title=f"품목별 매출 비중 ({selected_period})")
                 st.plotly_chart(fig_p2, use_container_width=True)
 
+        # 상세 실적 표
         st.markdown("---")
         t_col1, t_col2 = st.columns([5, 1])
         with t_col1: st.subheader("📑 상세 실적 통계 (업체별 순위)")
@@ -180,7 +188,7 @@ if not df_raw.empty:
 
         with t_col2:
             excel_data = to_excel(display_df)
-            st.download_button(label="🟢 엑셀 내보내기", data=excel_data, file_name=f"조달실적_v6.6.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            st.download_button(label="🟢 엑셀 내보내기", data=excel_data, file_name=f"조달실적_JoeyKim_{datetime.now().strftime('%Y%m%d')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
         def style_table(df):
             styler = df.style.apply(lambda r: ['font-weight: bold' if r.name < 20 else ''] * len(r), axis=1)
@@ -193,6 +201,5 @@ if not df_raw.empty:
         format_dict['No.'] = "{}"; format_dict['업체명'] = "{}"
         st.dataframe(style_table(display_df).format(format_dict).background_gradient(cmap='YlGnBu', subset=['전체 총액']), hide_index=True, column_config={"No.": st.column_config.NumberColumn("No.", width=40)}, use_container_width=True, height=600)
 
-# --- 🚨 [최종 푸터 추가] ---
 st.markdown("---")
 st.markdown('<div class="footer">Copyright(C)2026 by Joey Kim. All Right Reserved.</div>', unsafe_allow_html=True)
