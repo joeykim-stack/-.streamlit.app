@@ -6,12 +6,12 @@ import plotly.express as px
 from datetime import datetime, timedelta
 
 # 1. 페이지 설정 및 디자인
-st.set_page_config(page_title="Procurement Dashboard v4.6", layout="wide")
+st.set_page_config(page_title="Procurement Dashboard v4.7", layout="wide")
 
-# [디자인 강화] 타이틀 완벽 고정 및 사이드바 간격 대폭 축소 CSS
+# [디자인 강화] 타이틀 고정 및 사이드바 간격 '황금비율' 조정
 st.markdown("""
     <style>
-    /* 🚨 1. 타이틀 고정을 위한 스트림릿 기본 컨테이너 스크롤 강제 해제 */
+    /* 1. 타이틀 고정을 위한 스트림릿 기본 컨테이너 스크롤 강제 해제 */
     .main .block-container {
         overflow: initial !important;
         padding-top: 2rem !important;
@@ -21,20 +21,17 @@ st.markdown("""
     .stMetric { background-color: #ffffff; padding: 20px; border-radius: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
     h1, h2, h3 { color: #1e3a8a; font-family: 'Nanum Gothic', sans-serif; }
     
-    /* 🚨 2. 사이드바 체크박스 높이/간격을 기존의 40% 수준으로 초압축 */
+    /* 🚨 2. 사이드바 체크박스 간격 재조정 (숨막히지 않게 적당한 여백 부여) */
     section[data-testid="stSidebar"] div[data-testid="stCheckbox"] {
-        margin-top: -12px !important;
-        margin-bottom: -12px !important;
+        margin-top: -4px !important;
+        margin-bottom: -4px !important;
     }
     section[data-testid="stSidebar"] label[data-baseweb="checkbox"] {
-        min-height: 20px !important;
-        padding-bottom: 0px !important;
-        margin-bottom: 0px !important;
+        min-height: 26px !important;
     }
     section[data-testid="stSidebar"] .stCheckbox p {
-        font-size: 12.5px !important;
-        line-height: 1 !important;
-        padding-bottom: 0px !important;
+        font-size: 13.5px !important; /* 폰트도 살짝 키워서 눈이 편하게 */
+        line-height: 1.3 !important;
     }
     
     /* 사이드바 헤더 간격 조절 */
@@ -43,7 +40,7 @@ st.markdown("""
         margin-bottom: 5px;
     }
 
-    /* 🚨 3. 타이틀 상단 찰싹 고정 (Sticky Header) */
+    /* 3. 타이틀 상단 찰싹 고정 (Sticky Header) */
     .sticky-header {
         position: -webkit-sticky;
         position: sticky;
@@ -116,7 +113,7 @@ df_raw, api_status = load_data()
 # --- 3. 메인 화면 타이틀 (상단 고정 HTML) ---
 st.markdown("""
     <div class="sticky-header">
-        <h1 style="margin: 0; padding: 0;">🏆 통합 조달 전략 분석 대시보드 v4.6</h1>
+        <h1 style="margin: 0; padding: 0;">🏆 통합 조달 전략 분석 대시보드 v4.7</h1>
     </div>
 """, unsafe_allow_html=True)
 
