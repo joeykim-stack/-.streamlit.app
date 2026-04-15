@@ -6,14 +6,38 @@ import plotly.express as px
 from datetime import datetime, timedelta
 
 # 1. 페이지 설정 및 디자인
-st.set_page_config(page_title="Procurement Dashboard v4.3", layout="wide")
+st.set_page_config(page_title="Procurement Dashboard v4.5", layout="wide")
 
+# [디자인 강화] 타이틀 상단 고정 및 사이드바 폰트 축소 CSS
 st.markdown("""
     <style>
     .main { background-color: #f8f9fa; }
     .stMetric { background-color: #ffffff; padding: 20px; border-radius: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
     h1, h2, h3 { color: #1e3a8a; font-family: 'Nanum Gothic', sans-serif; }
-    .stCheckbox { margin-bottom: -10px; }
+    
+    /* 사이드바 체크박스 폰트 크기 축소 */
+    section[data-testid="stSidebar"] .stCheckbox p {
+        font-size: 13px !important;
+        margin-bottom: -5px;
+    }
+    
+    /* 사이드바 헤더 간격 조절 */
+    section[data-testid="stSidebar"] h2, section[data-testid="stSidebar"] h3 {
+        margin-top: -10px;
+    }
+
+    /* 🚨 타이틀 상단 고정 (Sticky Header) */
+    .sticky-header {
+        position: -webkit-sticky;
+        position: sticky;
+        top: 2.875rem; /* 스트림릿 기본 상단 바 바로 아래에 고정 */
+        background-color: #f8f9fa; /* 뒤에 글자가 비치지 않게 배경색 지정 */
+        z-index: 999;
+        padding: 10px 0 15px 0;
+        border-bottom: 2px solid #e9ecef;
+        margin-bottom: 20px;
+        margin-top: -30px;
+    }
     </style>
 """, unsafe_allow_html=True)
 
@@ -72,7 +96,15 @@ def load_data():
 
 df_raw, api_status = load_data()
 
-# --- 3. 사이드바 필터 로직 ---
+# --- 3. 메인 화면 타이틀 (상단 고정 HTML) ---
+# 기존 st.title() 대신 CSS가 적용된 HTML div를 사용합니다.
+st.markdown("""
+    <div class="sticky-header">
+        <h1 style="margin: 0; padding: 0;">🏆 통합 조달 전략 분석 대시보드 v4.5</h1>
+    </div>
+""", unsafe_allow_html=True)
+
+# --- 4. 사이드바 및 필터 로직 ---
 if not df_raw.empty:
     st.sidebar.header("🔍 분석 필터")
     all_categories = sorted(df_raw['물품분류명'].unique())
@@ -101,9 +133,6 @@ if not df_raw.empty:
 
     df_f = df_raw[(df_raw['물품분류명'].isin(selected_k)) & (df_raw['계약유형'].isin(selected_r))]
 
-    # --- 4. 메인 화면 구성 ---
-    st.title("🏆 통합 조달 전략 분석 대시보드 v4.3")
-    
     if df_f.empty:
         st.info("왼쪽 필터에서 품목을 선택해 주세요.")
     else:
@@ -132,7 +161,7 @@ if not df_raw.empty:
 
         # [상세 데이터 표]
         st.markdown("---")
-        st.subheader("📑 상세 실적 통계")
+        st.subheader("📑 상세 실적 통계 (업체별 순위)")
         
         show_cnt = st.checkbox("📊 월별 계약건수 함께 보기", value=False)
         
@@ -149,19 +178,21 @@ if not df_raw.empty:
         display_df['1분기 합계'] = pivot_amt.get(["1월", "2월", "3월"], pd.DataFrame()).sum(axis=1)
         display_df['전체 총액'] = pivot_amt.sum(axis=1)
 
-        # 🚨 [서식 수정 포인트] 컬럼명에 따라 '원' 또는 '건'을 다르게 붙임
+        display_df = display_df.sort_values('전체 총액', ascending=False)
+        display_df.insert(0, 'No.', range(1, len(display_df) + 1)) 
+
         def format_columns(val, col_name):
-            if "(건)" in col_name:
+            if col_name == "No.":
+                return f"{int(val)}"
+            elif "(건)" in col_name:
                 return f"{int(val):,}건"
             else:
                 return f"{int(val):,}원"
 
-        # 컬럼별로 서식 적용
         st.dataframe(
-            display_df.sort_values('전체 총액', ascending=False)
-            .style.format({col: (lambda v, c=col: format_columns(v, c)) for col in display_df.columns})
+            display_df.style.format({col: (lambda v, c=col: format_columns(v, c)) for col in display_df.columns})
             .background_gradient(cmap='YlGnBu', subset=['전체 총액']), 
-            use_container_width=True
+            use_container_width=True, height=600
         )
 else:
     st.error("데이터 로드 실패. 파일을 확인해 주세요.")
