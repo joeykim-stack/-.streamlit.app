@@ -8,9 +8,10 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from datetime import datetime
 
-# 1. 페이지 설정 및 디자인
-st.set_page_config(page_title="Procurement Dashboard v6.2", layout="wide")
+# 1. 페이지 설정
+st.set_page_config(page_title="Procurement Dashboard v6.3", layout="wide")
 
+# 스타일 설정
 st.markdown("""
     <style>
     .main .block-container { overflow: initial !important; padding-top: 2rem !important; }
@@ -19,8 +20,6 @@ st.markdown("""
     h1, h2, h3 { color: #1e3a8a; font-family: 'Nanum Gothic', sans-serif; }
     section[data-testid="stSidebar"] div[data-testid="stCheckbox"] { margin-top: -4px !important; margin-bottom: -4px !important; }
     section[data-testid="stSidebar"] label[data-baseweb="checkbox"] { min-height: 26px !important; }
-    section[data-testid="stSidebar"] .stCheckbox p { font-size: 13.5px !important; line-height: 1.3 !important; }
-    section[data-testid="stSidebar"] h2, section[data-testid="stSidebar"] h3 { margin-top: -15px; margin-bottom: 5px; }
     .sticky-header {
         position: -webkit-sticky; position: sticky; top: 2.875rem; 
         background-color: #f8f9fa; z-index: 9999;
@@ -28,11 +27,10 @@ st.markdown("""
         margin-top: -30px; margin-bottom: 20px;
     }
     .stDownloadButton > button { width: 100%; color: #ffffff; background-color: #1d6f42; border: none; font-weight: bold; }
-    .stDownloadButton > button:hover { background-color: #145a32; color: #ffffff; }
     </style>
 """, unsafe_allow_html=True)
 
-# --- [정밀 매칭] 52개 업체 리스트 ---
+# --- 🎯 [정밀 매칭] 중찬이가 준 52개 업체 리스트 ---
 TARGET_COMPANIES = [
     "주식회사 티제이원", "주식회사 파로스", "주식회사 포딕스시스템", "주식회사 세오", 
     "주식회사 펜타게이트", "주식회사 홍석", "주식회사 솔디아", "주식회사 디라직", 
@@ -67,10 +65,11 @@ def fetch_api_data():
                 df_api.columns = ['업체명', '물품분류명', '금액', '계약유형']
                 df_api['금액'] = pd.to_numeric(df_api['금액'], errors='coerce').fillna(0)
                 df_api['월'] = "4월"; df_api['건수'] = 1
+                # 공백 제거 후 화이트리스트 필터링
+                df_api['업체명'] = df_api['업체명'].astype(str).str.strip()
                 return df_api[df_api['업체명'].isin(TARGET_COMPANIES)], f"연동 성공 (신규 {len(df_api)}건)"
-            else: return pd.DataFrame(), "연결 성공: 실적 정산 대기 중"
     except: pass
-    return pd.DataFrame(), "실시간 연동 대기"
+    return pd.DataFrame(), "실시간 데이터 확인 대기"
 
 @st.cache_data(ttl=600)
 def load_data():
@@ -82,16 +81,18 @@ def load_data():
                 df = pd.read_csv(path, encoding='utf-8-sig', on_bad_lines='skip')
                 df.columns = [str(c).strip() for c in df.columns]
                 c_corp = next((c for c in df.columns if '업체명' in c), None)
+                c_amt = next((c for c in df.columns if '금액' in c or '납품금액' in c or '납품요구금액' in c), None)
                 c_item = next((c for c in df.columns if '물품분류명' in c), None)
                 c_method = next((c for c in df.columns if '계약유형' in c or '계약체결형태' in c), None)
-                c_amt = next((c for c in df.columns if '금액' in c or '납품금액' in c), None)
-                if all([c_corp, c_item, c_method, c_amt]):
+                
+                if all([c_corp, c_amt]):
                     tmp = pd.DataFrame()
                     tmp['업체명'] = df[c_corp].astype(str).str.strip()
-                    tmp['물품분류명'] = df[c_item].astype(str).str.strip()
-                    tmp['계약유형'] = df[c_method].astype(str).str.strip()
                     tmp['금액'] = pd.to_numeric(df[c_amt].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+                    tmp['물품분류명'] = df[c_item].astype(str).str.strip() if c_item else "기타"
+                    tmp['계약유형'] = df[c_method].astype(str).str.strip() if c_method else "일반"
                     tmp['월'] = month; tmp['건수'] = 1
+                    # 🚨 화이트리스트 필터링
                     all_dfs.append(tmp[tmp['업체명'].isin(TARGET_COMPANIES)])
             except: continue
     df_api, status = fetch_api_data()
@@ -100,14 +101,16 @@ def load_data():
 
 df_raw, api_status = load_data()
 
+# 🚨 [중요] 이전 버전의 블랙리스트 필터(~str.contains)는 이제 완전히 제거했습니다.
+
 def to_excel(df):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         df.to_excel(writer, index=False, sheet_name='실적통계')
     return output.getvalue()
 
-# --- 메인 레이아웃 ---
-st.markdown(f'<div class="sticky-header"><h1 style="margin: 0;">🏆 통합 조달 전략 분석 대시보드 v6.2</h1></div>', unsafe_allow_html=True)
+# --- 화면 출력부 ---
+st.markdown(f'<div class="sticky-header"><h1 style="margin: 0;">🏆 통합 조달 전략 분석 대시보드 v6.3</h1></div>', unsafe_allow_html=True)
 
 if not df_raw.empty:
     st.sidebar.header("🔍 분석 필터")
@@ -130,20 +133,19 @@ if not df_raw.empty:
     st.sidebar.write("---")
     if "연결 성공" in api_status: st.sidebar.info(f"🟢 {api_status}")
     else: st.sidebar.warning(f"⚠️ {api_status}")
-    st.sidebar.caption(f"🕒 마지막 동기화: {datetime.now().strftime('%H:%M:%S')}")
 
     df_f = df_raw[(df_raw['물품분류명'].isin(selected_k)) & (df_raw['계약유형'].isin(selected_r))]
 
     if df_f.empty: st.info("👈 왼쪽에서 분석할 품목을 선택해 주세요.")
     else:
-        # KPI 카드
+        # KPI
         t_amt, t_cnt = df_f['금액'].sum(), df_f['건수'].sum()
         k1, k2, k3 = st.columns(3)
         k1.metric("총 납품 실적", f"{int(t_amt/1000000):,} 백만 원")
         k2.metric("총 계약 건수", f"{int(t_cnt):,} 건")
         k3.metric("건당 평균가", f"{int(t_amt/t_cnt/10000) if t_cnt > 0 else 0:,} 만 원")
 
-        # 트렌드 차트
+        # 월별 트렌드
         st.markdown("### 📊 월별 매출 및 계약 건수 트렌드")
         trend = df_f.groupby('월').agg({'금액':'sum', '건수':'sum'}).reindex(["1월", "2월", "3월", "4월"]).fillna(0).reset_index()
         fig_trend = make_subplots(specs=[[{"secondary_y": True}]])
@@ -158,20 +160,18 @@ if not df_raw.empty:
         with t_col1: st.subheader("📑 상세 실적 통계 (업체별 순위)")
         
         pivot_amt = df_f.pivot_table(index='업체명', columns='월', values='금액', aggfunc='sum', fill_value=0)
-        pivot_cnt = df_f.pivot_table(index='업체명', columns='월', values='건수', aggfunc='sum', fill_value=0)
-        show_cnt = st.checkbox("📊 월별 계약건수 함께 보기", value=False)
+        show_cnt = st.checkbox("📊 월별 계약건수 함께 보기 (체크 해제 시 금액만 표시)", value=False)
         
+        # 컬럼 재배치
         display_df = pd.DataFrame(index=pivot_amt.index)
         for m in ["1월", "2월", "3월"]:
             if m in pivot_amt.columns:
                 display_df[f"{m}(액)"] = pivot_amt[m]
-                if show_cnt: display_df[f"{m}(건)"] = pivot_cnt[m]
         
         display_df['1분기 합계'] = pivot_amt.get(["1월", "2월", "3월"], pd.DataFrame()).sum(axis=1)
         
         if "4월" in pivot_amt.columns:
             display_df["4월(액)"] = pivot_amt["4월"]
-            if show_cnt: display_df["4월(건)"] = pivot_cnt["4월"]
             
         display_df['전체 총액'] = pivot_amt.sum(axis=1)
         display_df = display_df.sort_values('전체 총액', ascending=False).reset_index()
@@ -179,33 +179,21 @@ if not df_raw.empty:
 
         with t_col2:
             excel_data = to_excel(display_df)
-            st.download_button(label="🟢 엑셀 내보내기", data=excel_data, file_name=f"조달실적_v6.2_{datetime.now().strftime('%Y%m%d')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            st.download_button(label="🟢 엑셀 내보내기", data=excel_data, file_name=f"조달실적_v6.3_{datetime.now().strftime('%Y%m%d')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-        # 🚨 [컬럼별 색상 스타일링 함수]
+        # 스타일링 함수
         def style_table(df):
-            # 기본 스타일: 상위 20개 볼드 처리
             styler = df.style.apply(lambda r: ['font-weight: bold' if r.name < 20 else ''] * len(r), axis=1)
-            
-            # 컬럼별 배경색 지정
-            col_styles = {
-                'No.': 'background-color: #f8f9fa;',      # 연그레이
-                '1분기 합계': 'background-color: #fff9db;', # 연노랑
-                '4월(액)': 'background-color: #ebfbee;',   # 연녹색
-                '4월(건)': 'background-color: #ebfbee;',   # 연녹색
-                '전체 총액': 'background-color: #e7f5ff;'   # 연파랑
-            }
-            
-            for col, style in col_styles.items():
+            col_styles = {'No.': '#f8f9fa', '1분기 합계': '#fff9db', '4월(액)': '#ebfbee', '전체 총액': '#e7f5ff'}
+            for col, color in col_styles.items():
                 if col in df.columns:
-                    styler = styler.set_properties(subset=[col], **{'background-color': style.split(': ')[1].replace(';', '')})
-            
+                    styler = styler.set_properties(subset=[col], **{'background-color': color})
             return styler
 
-        format_dict = {col: "{:,.0f}건" if '(건)' in col else ("{}" if col in ['No.', '업체명'] else "{:,.0f}원") for col in display_df.columns}
+        format_dict = {col: "{:,.0f}원" for col in display_df.columns if "(액)" in col or "합계" in col or "총액" in col}
+        format_dict['No.'] = "{}"
         
-        # 스타일 적용 및 출력
         styled_df = style_table(display_df).format(format_dict).background_gradient(cmap='YlGnBu', subset=['전체 총액'])
-        
         st.dataframe(styled_df, hide_index=True, column_config={"No.": st.column_config.NumberColumn("No.", width=40)}, use_container_width=True, height=600)
 else:
     st.error("데이터 로드 실패. 깃허브 파일을 확인하세요.")
