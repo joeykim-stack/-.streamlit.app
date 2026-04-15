@@ -158,4 +158,10 @@ if not df_raw.empty:
 
         # 컬럼별로 서식 적용
         st.dataframe(
-            display_df.sort_
+            display_df.sort_values('전체 총액', ascending=False)
+            .style.format({col: (lambda v, c=col: format_columns(v, c)) for col in display_df.columns})
+            .background_gradient(cmap='YlGnBu', subset=['전체 총액']), 
+            use_container_width=True
+        )
+else:
+    st.error("데이터 로드 실패. 파일을 확인해 주세요.")
