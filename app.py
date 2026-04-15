@@ -187,4 +187,25 @@ if not df_raw.empty:
             styler = df.style.apply(lambda r: ['font-weight: bold' if r.name < 20 else ''] * len(r), axis=1)
             
             # 컬럼별 배경색 지정
-            col_styles
+            col_styles = {
+                'No.': 'background-color: #f8f9fa;',      # 연그레이
+                '1분기 합계': 'background-color: #fff9db;', # 연노랑
+                '4월(액)': 'background-color: #ebfbee;',   # 연녹색
+                '4월(건)': 'background-color: #ebfbee;',   # 연녹색
+                '전체 총액': 'background-color: #e7f5ff;'   # 연파랑
+            }
+            
+            for col, style in col_styles.items():
+                if col in df.columns:
+                    styler = styler.set_properties(subset=[col], **{'background-color': style.split(': ')[1].replace(';', '')})
+            
+            return styler
+
+        format_dict = {col: "{:,.0f}건" if '(건)' in col else ("{}" if col in ['No.', '업체명'] else "{:,.0f}원") for col in display_df.columns}
+        
+        # 스타일 적용 및 출력
+        styled_df = style_table(display_df).format(format_dict).background_gradient(cmap='YlGnBu', subset=['전체 총액'])
+        
+        st.dataframe(styled_df, hide_index=True, column_config={"No.": st.column_config.NumberColumn("No.", width=40)}, use_container_width=True, height=600)
+else:
+    st.error("데이터 로드 실패. 깃허브 파일을 확인하세요.")
