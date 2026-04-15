@@ -6,12 +6,11 @@ import plotly.express as px
 from datetime import datetime, timedelta
 
 # 1. 페이지 설정 및 디자인
-st.set_page_config(page_title="Procurement Dashboard v4.7", layout="wide")
+st.set_page_config(page_title="Procurement Dashboard v4.8", layout="wide")
 
-# [디자인 강화] 타이틀 고정 및 사이드바 간격 '황금비율' 조정
+# [디자인 강화] 타이틀 고정 및 사이드바 간격 황금비율
 st.markdown("""
     <style>
-    /* 1. 타이틀 고정을 위한 스트림릿 기본 컨테이너 스크롤 강제 해제 */
     .main .block-container {
         overflow: initial !important;
         padding-top: 2rem !important;
@@ -21,7 +20,7 @@ st.markdown("""
     .stMetric { background-color: #ffffff; padding: 20px; border-radius: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
     h1, h2, h3 { color: #1e3a8a; font-family: 'Nanum Gothic', sans-serif; }
     
-    /* 🚨 2. 사이드바 체크박스 간격 재조정 (숨막히지 않게 적당한 여백 부여) */
+    /* 사이드바 체크박스 간격 재조정 */
     section[data-testid="stSidebar"] div[data-testid="stCheckbox"] {
         margin-top: -4px !important;
         margin-bottom: -4px !important;
@@ -30,22 +29,21 @@ st.markdown("""
         min-height: 26px !important;
     }
     section[data-testid="stSidebar"] .stCheckbox p {
-        font-size: 13.5px !important; /* 폰트도 살짝 키워서 눈이 편하게 */
+        font-size: 13.5px !important;
         line-height: 1.3 !important;
     }
     
-    /* 사이드바 헤더 간격 조절 */
     section[data-testid="stSidebar"] h2, section[data-testid="stSidebar"] h3 {
         margin-top: -15px;
         margin-bottom: 5px;
     }
 
-    /* 3. 타이틀 상단 찰싹 고정 (Sticky Header) */
+    /* 타이틀 상단 고정 (Sticky Header) */
     .sticky-header {
         position: -webkit-sticky;
         position: sticky;
-        top: 2.875rem; /* 상단 바 바로 아래에 고정 */
-        background-color: #f8f9fa; /* 글자 비침 방지용 메인 배경색 */
+        top: 2.875rem; 
+        background-color: #f8f9fa; 
         z-index: 9999;
         padding: 10px 0 10px 0;
         border-bottom: 2px solid #e9ecef;
@@ -113,7 +111,7 @@ df_raw, api_status = load_data()
 # --- 3. 메인 화면 타이틀 (상단 고정 HTML) ---
 st.markdown("""
     <div class="sticky-header">
-        <h1 style="margin: 0; padding: 0;">🏆 통합 조달 전략 분석 대시보드 v4.7</h1>
+        <h1 style="margin: 0; padding: 0;">🏆 통합 조달 전략 분석 대시보드 v4.8</h1>
     </div>
 """, unsafe_allow_html=True)
 
@@ -122,18 +120,33 @@ if not df_raw.empty:
     st.sidebar.header("🔍 분석 필터")
     all_categories = sorted(df_raw['물품분류명'].unique())
     
-    if "selected_k" not in st.session_state:
-        st.session_state.selected_k = all_categories
+    # 🚨 [새로운 로직] 품목별 체크박스 상태를 세션에 저장
+    for cat in all_categories:
+        if f"cat_{cat}" not in st.session_state:
+            st.session_state[f"cat_{cat}"] = True # 기본값: 모두 체크됨
 
-    master_k = st.sidebar.checkbox("🌟 품목 분류 전체 선택", value=len(st.session_state.selected_k) == len(all_categories))
+    # 전체 선택 / 전체 해제 버튼 동작 함수
+    def check_all():
+        for c in all_categories:
+            st.session_state[f"cat_{c}"] = True
+
+    def uncheck_all():
+        for c in all_categories:
+            st.session_state[f"cat_{c}"] = False
+
+    # 공간 절약을 위해 두 버튼을 나란히 배치 (바로 아래 원하면 st.sidebar.button으로 각각 작성 가능)
+    col1, col2 = st.sidebar.columns(2)
+    col1.button("✅ 전체 선택", on_click=check_all, use_container_width=True)
+    col2.button("❌ 전체 해제", on_click=uncheck_all, use_container_width=True)
     
     selected_k = []
     st.sidebar.write("---")
     st.sidebar.subheader("📦 상세 품목 리스트")
+    
+    # 개별 품목 체크박스 렌더링
     for cat in all_categories:
-        if st.sidebar.checkbox(cat, value=master_k or cat in st.session_state.selected_k, key=f"cat_{cat}"):
+        if st.sidebar.checkbox(cat, key=f"cat_{cat}"):
             selected_k.append(cat)
-    st.session_state.selected_k = selected_k
 
     st.sidebar.write("---")
     unique_r = sorted(df_raw['계약유형'].unique())
@@ -147,7 +160,7 @@ if not df_raw.empty:
     df_f = df_raw[(df_raw['물품분류명'].isin(selected_k)) & (df_raw['계약유형'].isin(selected_r))]
 
     if df_f.empty:
-        st.info("왼쪽 필터에서 품목을 선택해 주세요.")
+        st.info("👈 왼쪽 사이드바에서 분석할 품목을 하나 이상 선택해 주세요.")
     else:
         # [KPI 카드]
         t_amt, t_cnt = df_f['금액'].sum(), df_f['건수'].sum()
