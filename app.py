@@ -50,16 +50,25 @@ TARGET_COMPANIES = [
 
 SERVICE_KEY = "c1b3792f-37f0-4d57-897b-3b3614522855"
 
+# 🚨 [새로 교체된 진단용 통신 함수] 🚨
 def fetch_api_data():
     today = datetime.now().strftime("%Y%m%d")
     url = "http://apis.data.go.kr/1230000/ShoppingMallPrdctInfoService05/getDlvrReqInfoList"
     params = {'serviceKey': requests.utils.unquote(SERVICE_KEY), 'type': 'json', 'numOfRows': '999', 'pageNo': '1', 'inqryDiv': '1', 'inqryBgnDate': '20260415', 'inqryEndDate': today}
+    
     try:
-        res = requests.get(url, params=params, timeout=10)
+        # 타임아웃을 15초로 넉넉하게 늘림
+        res = requests.get(url, params=params, timeout=15)
+        
         if res.status_code == 200:
-            data = res.json()
+            try:
+                data = res.json()
+            except Exception as e:
+                return pd.DataFrame(), f"API 응답 오류 (JSON 파싱 실패)"
+                
             items = data.get('response', {}).get('body', {}).get('items', [])
             raw_items = items.get('item', []) if isinstance(items, dict) else items
+            
             if raw_items:
                 df = pd.DataFrame(raw_items)
                 df_api = df[['corpNm', 'prdctClsfcNm', 'dlvrReqAmt', 'cntrctCnclsStleNm']].copy()
@@ -69,9 +78,19 @@ def fetch_api_data():
                 df_api['업체명'] = df_api['업체명'].astype(str).str.strip()
                 filtered_api = df_api[df_api['업체명'].isin(TARGET_COMPANIES)]
                 return filtered_api, f"연동 성공 (신규 {len(filtered_api)}건)"
-            else: return pd.DataFrame(), "연결 성공: 실적 정산 대기 중"
-    except: pass
-    return pd.DataFrame(), "실시간 데이터 확인 대기"
+            else: 
+                return pd.DataFrame(), "연결 정상: 4/15 정산 데이터 대기 중"
+        elif res.status_code == 429:
+            return pd.DataFrame(), "API 트래픽(일일 한도) 초과"
+        elif res.status_code >= 500:
+            return pd.DataFrame(), f"조달청 서버 장애 (에러 {res.status_code})"
+        else:
+            return pd.DataFrame(), f"알 수 없는 통신 에러 (에러 {res.status_code})"
+            
+    except requests.exceptions.Timeout:
+        return pd.DataFrame(), "조달청 서버 응답 지연 (타임아웃)"
+    except Exception as e:
+        return pd.DataFrame(), f"네트워크 오류 발생"
 
 @st.cache_data(ttl=600)
 def load_data():
@@ -107,7 +126,7 @@ def to_excel(df):
         df.to_excel(writer, index=False, sheet_name='실적통계')
     return output.getvalue()
 
-# --- 화면 출력부 ---
+# --- 화면 출력 ---
 st.markdown(f'<div class="sticky-header"><h1 style="margin: 0;">🏆 통합 조달 전략 분석 대시보드 v6.6</h1></div>', unsafe_allow_html=True)
 
 if not df_raw.empty:
@@ -121,14 +140,14 @@ if not df_raw.empty:
     if col2.button("❌ 전체 해제"): 
         for c in all_cats: st.session_state[f"cat_{c}"] = False
     selected_k = [c for c in all_cats if st.sidebar.checkbox(c, key=f"cat_{c}")]
-    
     st.sidebar.write("---")
     unique_r = sorted(df_raw['계약유형'].unique())
     master_r = st.sidebar.checkbox("📄 계약유형 전체 선택", value=True)
     selected_r = [m for m in unique_r if st.sidebar.checkbox(m, value=master_r, key=f"r_{m}")]
     
     st.sidebar.write("---")
-    if "연결 성공" in api_status or "연동 성공" in api_status: st.sidebar.info(f"🟢 {api_status}")
+    if "연결 정상" in api_status: st.sidebar.info(f"🟢 {api_status}")
+    elif "연동 성공" in api_status: st.sidebar.success(f"🔵 {api_status}")
     else: st.sidebar.warning(f"⚠️ {api_status}")
     st.sidebar.caption(f"🕒 마지막 확인: {datetime.now().strftime('%H:%M:%S')}")
 
@@ -136,7 +155,7 @@ if not df_raw.empty:
 
     if df_f.empty: st.info("👈 왼쪽에서 분석할 품목을 선택해 주세요.")
     else:
-        # KPI 카드
+        # KPI
         t_amt, t_cnt = df_f['금액'].sum(), df_f['건수'].sum()
         k1, k2, k3 = st.columns(3)
         k1.metric("총 납품 실적", f"{int(t_amt/1000000):,} 백만 원")
@@ -152,7 +171,7 @@ if not df_raw.empty:
         fig_trend.update_layout(margin=dict(l=0, r=0, b=0, t=30), height=300, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1), plot_bgcolor='rgba(0,0,0,0)')
         st.plotly_chart(fig_trend, use_container_width=True)
 
-        # 점유율 분석
+        # 점유율 파이 차트
         st.markdown("---")
         st.markdown("### 💎 기간별 점유율 분석")
         selected_period = st.selectbox("📅 분석 기간 선택", ["전체합계", "1분기 (1~3월)", "1월", "2월", "3월", "4월"])
@@ -201,5 +220,6 @@ if not df_raw.empty:
         format_dict['No.'] = "{}"; format_dict['업체명'] = "{}"
         st.dataframe(style_table(display_df).format(format_dict).background_gradient(cmap='YlGnBu', subset=['전체 총액']), hide_index=True, column_config={"No.": st.column_config.NumberColumn("No.", width=40)}, use_container_width=True, height=600)
 
+# 푸터 영역
 st.markdown("---")
 st.markdown('<div class="footer">Copyright(C)2026 by Joey Kim. All Right Reserved.</div>', unsafe_allow_html=True)
