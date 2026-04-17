@@ -19,10 +19,9 @@ st.markdown("""
         padding: 1rem 0;
         border-bottom: 2px solid #e9ecef;
     }
-    .css-1d391kg { padding-top: 1rem; }
     </style>
     <div class="sticky-header">
-        <h1>🏆 통합 조달 전략 분석 대시보드 v7.0</h1>
+        <h1>🏆 통합 조달 전략 분석 대시보드 v7.1</h1>
     </div>
 """, unsafe_allow_html=True)
 
@@ -43,7 +42,7 @@ TARGET_COMPANIES = [
     "비티에스 주식회사", "주식회사 인텔리빅스", "주식회사 비알인포텍"
 ]
 
-# --- 3. 과거 데이터 (CSV) 로드 ---
+# --- 3. 데이터 로드 및 API 연동 함수들 ---
 @st.cache_data(ttl=3600)
 def load_local_data():
     files = ['data_mini.csv', 'data02_mini.csv', 'data03_mini.csv', 'data04.csv']
@@ -53,192 +52,110 @@ def load_local_data():
             df = pd.read_csv(file)
             df.rename(columns=lambda x: x.strip(), inplace=True)
             amt_col = '납품요구금액' if '납품요구금액' in df.columns else '금액'
-            df = df[['업체명', '물품분류명', amt_col, '계약체결형태명']]
-            df.columns = ['업체명', '물품분류명', '금액', '계약유형']
+            df = df[['업체명', '물품분류명', amt_col]]
+            df.columns = ['업체명', '물품분류명', '금액']
             df['월'] = f"{idx+1}월"
             df['업체명'] = df['업체명'].astype(str).str.strip()
             df = df[df['업체명'].isin(TARGET_COMPANIES)]
             dfs.append(df)
-        except Exception:
-            continue
+        except: continue
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
-# --- 4. 🚀 실시간 API 호출 (30분 쿨타임 재시도 로직) ---
-def fetch_api_with_smart_retry():
-    # 세션 상태 초기화
-    if 'last_try_time' not in st.session_state:
-        st.session_state['last_try_time'] = None
-    if 'is_success' not in st.session_state:
-        st.session_state['is_success'] = False
-    if 'api_data' not in st.session_state:
-        st.session_state['api_data'] = pd.DataFrame()
+def fetch_api_data():
+    if 'last_try_time' not in st.session_state: st.session_state.last_try_time = None
+    if 'is_success' not in st.session_state: st.session_state.is_success = False
+    if 'api_df' not in st.session_state: st.session_state.api_df = pd.DataFrame()
 
     now = datetime.now()
+    # 30분 쿨타임 체크
+    if st.session_state.is_success:
+        return st.session_state.api_df, "🟢 실시간 연동 성공 상태"
+    
+    if st.session_state.last_try_time and (now - st.session_state.last_try_time) < timedelta(minutes=30):
+        next_t = (st.session_state.last_try_time + timedelta(minutes=30)).strftime('%H:%M:%S')
+        return pd.DataFrame(), f"⏳ 서버 대기 중 (다음 시도: {next_t})"
 
-    # 이미 성공했다면 캐시된 데이터 반환
-    if st.session_state['is_success']:
-        return st.session_state['api_data'], "🟢 API 연동 성공! 실시간 데이터 유지 중"
-
-    # 최초 실행이거나 마지막 시도 후 30분이 지났을 경우에만 서버 찌르기
-    if st.session_state['last_try_time'] is None or (now - st.session_state['last_try_time']) > timedelta(minutes=30):
-        st.session_state['last_try_time'] = now # 시도 시간 업데이트
-        
+    st.session_state.last_try_time = now
+    try:
         API_KEY = "c1b379f7734c7d624ddefea07510eae71b6e12c5fb89970319d76c5ae8db5248"
         URL = "http://apis.data.go.kr/1230000/at/ShoppingMallPrdctInfoService/getDlvrReqInfoList"
-        # 시작 날짜는 4월 15일 (data04.csv 이후)
-        params = {
-            'serviceKey': API_KEY,
-            'numOfRows': '100', 'pageNo': '1', 'inqryDiv': '1',
-            'inqryBgnDate': '20260415',
-            'inqryEndDate': now.strftime('%Y%m%d')
-        }
-        
-        try:
-            res = requests.get(URL, params=params, timeout=10)
-            if res.status_code == 200:
-                root = ET.fromstring(res.content)
-                items = root.findall('.//item')
-                if items:
-                    # 데이터 파싱 성공
-                    data_list = []
-                    for item in items:
-                        corp = item.findtext('corpNm', '').strip()
-                        if corp in TARGET_COMPANIES:
-                            data_list.append({
-                                '업체명': corp,
-                                '물품분류명': item.findtext('prdctClsfcNm', ''),
-                                '금액': float(item.findtext('dlvrReqAmt', 0)),
-                                '계약유형': item.findtext('cntrctCnclsStleNm', ''),
-                                '월': '4월'
-                            })
-                    df_api = pd.DataFrame(data_list)
-                    st.session_state['is_success'] = True
-                    st.session_state['api_data'] = df_api
-                    return df_api, "🟢 연동 성공! 실시간 데이터 업데이트 완료"
-                else:
-                    return pd.DataFrame(), "🔵 연결 정상: 금일 정산 실적 대기 중"
-            elif res.status_code == 500:
-                next_time = (now + timedelta(minutes=30)).strftime('%H:%M:%S')
-                return pd.DataFrame(), f"⚠️ 조달청 야간 배치/점검 중 (500) - 다음 재시도: {next_time}"
-            elif res.status_code == 429:
-                next_time = (now + timedelta(minutes=30)).strftime('%H:%M:%S')
-                return pd.DataFrame(), f"⚠️ 일일 트래픽 초과 (429) - 자정 후 갱신 대기 (다음 확인: {next_time})"
-            else:
-                next_time = (now + timedelta(minutes=30)).strftime('%H:%M:%S')
-                return pd.DataFrame(), f"⚠️ 통신 장애 ({res.status_code}) - 다음 재시도: {next_time}"
-                
-        except Exception as e:
-            next_time = (now + timedelta(minutes=30)).strftime('%H:%M:%S')
-            return pd.DataFrame(), f"⚠️ 서버 타임아웃/응답 없음 - 다음 재시도: {next_time}"
-            
-    # 30분이 지나지 않았다면 쿨타임 대기 메시지 반환 (서버 호출 안함)
-    else:
-        next_time = (st.session_state['last_try_time'] + timedelta(minutes=30)).strftime('%H:%M:%S')
-        return pd.DataFrame(), f"⏳ 서버 안정화 대기 쿨타임 적용 중... (다음 시도: {next_time})"
+        params = {'serviceKey': API_KEY, 'numOfRows': '100', 'inqryDiv': '1', 
+                  'inqryBgnDate': '20260415', 'inqryEndDate': now.strftime('%Y%m%d')}
+        res = requests.get(URL, params=params, timeout=10)
+        if res.status_code == 200:
+            root = ET.fromstring(res.content)
+            items = root.findall('.//item')
+            data_list = []
+            for item in items:
+                corp = item.findtext('corpNm', '').strip()
+                if corp in TARGET_COMPANIES:
+                    data_list.append({'업체명': corp, '물품분류명': item.findtext('prdctClsfcNm', ''),
+                                      '금액': float(item.findtext('dlvrReqAmt', 0)), '월': '4월'})
+            df_api = pd.DataFrame(data_list)
+            st.session_state.is_success = True
+            st.session_state.api_df = df_api
+            return df_api, "🟢 실시간 데이터 업데이트 완료"
+        return pd.DataFrame(), f"⚠️ 서버 응답 에러 ({res.status_code})"
+    except:
+        return pd.DataFrame(), "⚠️ 통신 시간 초과"
 
-# --- 5. 데이터 병합 및 UI 렌더링 ---
+# --- 4. 메인 데이터 처리 ---
 df_local = load_local_data()
-df_api, api_status_msg = fetch_api_with_smart_retry()
+df_api, api_status = fetch_api_data()
+df_total = pd.concat([df_local, df_api], ignore_index=True) if not df_api.empty else df_local
 
-if not df_api.empty:
-    df_total = pd.concat([df_local, df_api], ignore_index=True)
-else:
-    df_total = df_local.copy()
-
-# 사이드바 UI
+# --- 5. 사이드바 필터 (핵심 수정 부분) ---
 with st.sidebar:
-    st.markdown("### 🔍 분석 필터")
-    st.info(api_status_msg)
+    st.header("🔍 분석 필터")
+    st.info(api_status)
     
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("✅ 전체 선택"):
-            if not df_total.empty:
-                st.session_state['selected_items'] = list(df_total['물품분류명'].dropna().unique())
-    with col2:
-        if st.button("❌ 전체 해제"):
-            st.session_state['selected_items'] = []
+    if not df_total.empty:
+        all_items = sorted(df_total['물품분류명'].dropna().unique())
+        
+        # 세션 스테이트 초기화 (데이터가 있을 때만)
+        if 'sel_items' not in st.session_state or not st.session_state.sel_items:
+            st.session_state.sel_items = all_items
 
-    if 'selected_items' not in st.session_state:
-        if not df_total.empty:
-            st.session_state['selected_items'] = list(df_total['물품분류명'].dropna().unique())
-        else:
-            st.session_state['selected_items'] = []
-            
-    options = list(df_total['물품분류명'].dropna().unique()) if not df_total.empty else []
-    selected_items = st.multiselect("품목 선택", options=options, default=st.session_state.get('selected_items', []))
+        # 전체 선택/해제 버튼
+        c1, c2 = st.columns(2)
+        if c1.button("✅ 전체 선택"): st.session_state.sel_items = all_items
+        if c2.button("❌ 전체 해제"): st.session_state.sel_items = []
 
-# 메인 필터링 및 화면 출력
+        # 필터 위젯 (이 부분이 무조건 나와야 함)
+        selected_items = st.multiselect("품목을 선택하세요", options=all_items, default=st.session_state.sel_items)
+    else:
+        st.warning("데이터 로딩 중입니다...")
+        selected_items = []
+
+# --- 6. 메인 화면 렌더링 ---
 if not df_total.empty and selected_items:
-    df_filtered = df_total[df_total['물품분류명'].isin(selected_items)]
+    df_f = df_total[df_total['물품분류명'].isin(selected_items)]
     
-    st.success(f"🟢 데이터 로딩 완료! (총 {len(df_filtered):,}건의 데이터 렌더링 중)")
-    
-    # --- 📊 1. 핵심 요약 지표 (Metrics) ---
-    total_amt = df_filtered['금액'].sum()
-    total_cnt = len(df_filtered)
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        st.info("💰 누적 납품요구금액")
-        st.subheader(f"{total_amt:,.0f} 원")
-    with col2:
-        st.info("📝 총 계약 건수")
-        st.subheader(f"{total_cnt:,} 건")
+    # 지표
+    m1, m2 = st.columns(2)
+    m1.metric("💰 총 납품요구금액", f"{df_f['금액'].sum():,.0f}원")
+    m2.metric("📝 총 계약 건수", f"{len(df_f):,}건")
 
-    st.markdown("---")
+    # 차트
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.subheader("🏆 업체별 매출 Top 10")
+        top10 = df_f.groupby('업체명')['금액'].sum().nlargest(10).reset_index()
+        st.plotly_chart(px.bar(top10, x='업체명', y='금액', text_auto='.2s', color='금액'), use_container_width=True)
+    with col_b:
+        st.subheader("🍩 품목별 점유율")
+        st.plotly_chart(px.pie(df_f, names='물품분류명', values='금액', hole=0.4), use_container_width=True)
 
-    # --- 📈 2. 차트 렌더링 ---
-    col_chart1, col_chart2 = st.columns(2)
+    # 표 및 다운로드
+    st.subheader("📋 상세 실적 내역")
+    view_df = df_f.groupby(['업체명', '물품분류명', '월'])['금액'].sum().reset_index().sort_values('금액', ascending=False)
+    st.dataframe(view_df, use_container_width=True)
 
-    with col_chart1:
-        st.markdown("### 🏆 업체별 매출 순위 (Top 10)")
-        top_10 = df_filtered.groupby('업체명')['금액'].sum().nlargest(10).reset_index()
-        fig_bar = px.bar(top_10, x='업체명', y='금액', text_auto='.2s', 
-                         color='금액', color_continuous_scale='Blues')
-        fig_bar.update_layout(xaxis_title="업체명", yaxis_title="매출액(원)")
-        st.plotly_chart(fig_bar, use_container_width=True)
-
-    with col_chart2:
-        st.markdown("### 🍩 시장 점유율 (품목별)")
-        fig_pie = px.pie(df_filtered, names='물품분류명', values='금액', hole=0.4)
-        fig_pie.update_traces(textposition='inside', textinfo='percent+label')
-        st.plotly_chart(fig_pie, use_container_width=True)
-
-    st.markdown("---")
-
-    # --- 📋 3. 상세 실적 데이터 표 ---
-    st.markdown("### 📋 상세 실적 데이터베이스")
-    display_df = df_filtered.groupby(['업체명', '물품분류명', '월']).agg(
-        금액=('금액', 'sum'), 
-        건수=('금액', 'count')
-    ).reset_index().sort_values(by='금액', ascending=False)
-    
-    st.dataframe(display_df, use_container_width=True, height=300)
-
-    # --- 💾 4. 엑셀 다운로드 기능 ---
-    def to_excel(df):
-        output = BytesIO()
-        writer = pd.ExcelWriter(output, engine='xlsxwriter')
-        df.to_excel(writer, index=False, sheet_name='조달실적분석')
-        writer.close()
-        processed_data = output.getvalue()
-        return processed_data
-
-    st.download_button(
-        label="💾 엑셀(.xlsx) 보고서 다운로드",
-        data=to_excel(display_df),
-        file_name='조달실적_통합분석보고서.xlsx',
-        mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-    )
-    
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        view_df.to_excel(writer, index=False)
+    st.download_button("💾 엑셀 다운로드", output.getvalue(), "조달실적분석.xlsx", "application/vnd.ms-excel")
 else:
-    st.warning("데이터가 없거나 품목이 선택되지 않았습니다. 왼쪽 사이드바에서 필터를 확인해주세요.")
+    st.info("왼쪽 필터에서 품목을 선택하면 분석이 시작됩니다.")
 
-# --- 카피라이트 ---
-st.markdown("""
-    <hr>
-    <div style='text-align: center; color: #adb5bd; padding: 20px 0;'>
-        Copyright(C)2026 by Joey Kim. All Right Reserved.
-    </div>
-""", unsafe_allow_html=True)
+st.markdown("<br><center style='color:gray;'>Copyright(C) 2026 Joey Kim.</center>", unsafe_allow_html=True)
