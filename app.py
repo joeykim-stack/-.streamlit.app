@@ -113,10 +113,10 @@ df_hist = load_historical_data()
 df_api, api_msg = update_realtime_data()
 df_total = pd.concat([df_hist, df_api], ignore_index=True) if not df_api.empty else df_hist.copy()
 
-st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v8.4</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v8.5</div>", unsafe_allow_html=True)
 st.markdown(f"<div class='update-time'>🕒 마지막 업데이트: {st.session_state.last_update} | 상태: {api_msg}</div>", unsafe_allow_html=True)
 
-# --- 6. 사이드바 필터 ---
+# --- 6. 사이드바 필터 (쓸데없는 버튼 제거, 심플하게 유지!) ---
 with st.sidebar:
     st.markdown("### 🔍 품목 필터")
     all_items = sorted(df_total['물품분류명'].dropna().astype(str).unique()) if not df_total.empty else []
@@ -126,11 +126,6 @@ with st.sidebar:
         selected = st.multiselect("품목 상세", options=all_items, default=all_items, label_visibility="collapsed")
     else:
         selected = st.multiselect("품목 상세", options=all_items, default=[], label_visibility="collapsed")
-    
-    st.markdown("---")
-    
-    st.markdown("### 📊 분석 기준")
-    view_mode = st.radio("데이터 표출 방식", ["💰 매출액(원)", "📝 계약건수(건)"])
 
 # --- 7. 메인 차트 및 대시보드 ---
 if df_total.empty:
@@ -140,6 +135,7 @@ elif not selected:
 else:
     df_f = df_total[df_total['물품분류명'].isin(selected)]
     
+    # 📊 1. 핵심 지표
     total_cnt = df_f['납품요구번호'].nunique()
     total_amt = df_f['금액'].sum()
     avg_amt = total_amt / total_cnt if total_cnt > 0 else 0
@@ -157,57 +153,69 @@ else:
     fig_combo.add_trace(go.Scatter(x=monthly_df['월'], y=monthly_df['건수'], name='계약건수(건)', mode='lines+markers+text', text=monthly_df['건수'], textposition='top center', marker_color='#ef4444', yaxis='y2'))
     fig_combo.update_layout(yaxis=dict(title='매출액(원)', showgrid=False), yaxis2=dict(title='계약건수(건)', overlaying='y', side='right', showgrid=False), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1), margin=dict(l=0, r=0, t=30, b=0))
     
-    # 🏆 도넛 차트
+    # 🏆 도넛 차트 (항상 매출액 기준으로 고정!)
     col_a, col_b = st.columns(2)
     with col_a:
         st.subheader("📈 월별 실적 추이")
         st.plotly_chart(fig_combo, use_container_width=True)
         
     with col_b:
-        metric_col = '금액' if view_mode == "💰 매출액(원)" else '납품요구번호'
-        metric_agg = 'sum' if view_mode == "💰 매출액(원)" else 'nunique'
-        st.subheader(f"🍩 시장 점유율 ({view_mode})")
-        top10 = df_f.groupby('업체명').agg(수치=(metric_col, metric_agg)).nlargest(10, '수치').reset_index()
-        fig_pie = px.pie(top10, names='업체명', values='수치', hole=0.4, color_discrete_sequence=px.colors.qualitative.Pastel)
+        st.subheader("🍩 시장 점유율 (매출액 기준)")
+        top10 = df_f.groupby('업체명')['금액'].sum().nlargest(10).reset_index()
+        fig_pie = px.pie(top10, names='업체명', values='금액', hole=0.4, color_discrete_sequence=px.colors.qualitative.Pastel)
         fig_pie.update_traces(textposition='inside', textinfo='percent+label')
         fig_pie.update_layout(showlegend=False, margin=dict(l=0, r=0, t=30, b=0))
         st.plotly_chart(fig_pie, use_container_width=True)
 
     st.markdown("---")
 
-    # 📋 4. 업체별 피벗 테이블 (디자인 최적화 완료!)
-    st.subheader(f"📋 업체별 종합 실적 랭킹 보드 ({view_mode})")
+    # 📋 4. 업체별 피벗 테이블 (건수 체크박스 도입!)
+    st.subheader("📋 업체별 종합 실적 랭킹 보드")
     
-    val_col = '금액' if view_mode == "💰 매출액(원)" else '납품요구번호'
-    agg_func = 'sum' if view_mode == "💰 매출액(원)" else 'nunique'
+    # 💡 [핵심] 테이블 바로 위에 체크박스 생성
+    show_count = st.checkbox("📝 표에 총 계약건수 함께 보기", value=False)
     
-    pivot_df = pd.pivot_table(df_f, values=val_col, index='업체명', columns='월', aggfunc=agg_func, fill_value=0).reset_index()
-    
+    # 1. 매출액 피벗 테이블 생성
+    pivot_df = pd.pivot_table(df_f, values='금액', index='업체명', columns='월', aggfunc='sum', fill_value=0).reset_index()
     for m in ['1월', '2월', '3월', '4월']:
         if m not in pivot_df.columns: pivot_df[m] = 0
             
     pivot_df['1분기 합계'] = pivot_df['1월'] + pivot_df['2월'] + pivot_df['3월']
     pivot_df['누적 합계'] = pivot_df['1분기 합계'] + pivot_df['4월']
     
-    final_table = pivot_df.sort_values('누적 합계', ascending=False).reset_index(drop=True)
+    # 2. 계약 건수 테이블 생성
+    cnt_df = df_f.groupby('업체명')['납품요구번호'].nunique().reset_index().rename(columns={'납품요구번호':'총계약건수'})
+    
+    # 3. 데이터 병합 (랭킹은 무조건 누적 매출액 기준!)
+    final_table = pd.merge(pivot_df, cnt_df, on='업체명').sort_values('누적 합계', ascending=False).reset_index(drop=True)
     final_table.insert(0, '랭킹 No.', range(1, len(final_table) + 1))
     
-    cols_order = ['랭킹 No.', '업체명', '1월', '2월', '3월', '1분기 합계', '4월', '누적 합계']
-    final_table = final_table[cols_order]
+    # 4. 체크박스 상태에 따라 표에 보여줄 칼럼 결정
+    base_cols = ['랭킹 No.', '업체명', '1월', '2월', '3월', '1분기 합계', '4월', '누적 합계']
+    if show_count:
+        display_cols = base_cols + ['총계약건수']
+    else:
+        display_cols = base_cols
+        
+    final_table = final_table[display_cols]
     
-    color_map = 'Blues' if view_mode == "💰 매출액(원)" else 'Greens'
-    format_str = "{:,.0f}" if view_mode == "💰 매출액(원)" else "{:,}"
+    # 5. 엑셀 조건부 서식 (아름다운 색상 적용)
+    format_dict = {col: "{:,.0f}" for col in ['1월', '2월', '3월', '1분기 합계', '4월', '누적 합계']}
+    if show_count: format_dict['총계약건수'] = "{:,}"
     
-    # 숫자 포맷 적용
-    styled_table = final_table.style.format({col: format_str for col in ['1월', '2월', '3월', '1분기 합계', '4월', '누적 합계']})
+    styled_table = final_table.style.format(format_dict)
     
-    # 💡 [디자인 핵심] 구역별로 깔끔하게 배경색 지정 (눈이 편안한 반투명 색상 사용)
+    # 업체명 (회색) / 월별 (연파랑) / 1분기 (연주황)
     styled_table = styled_table.set_properties(subset=['업체명'], **{'background-color': 'rgba(128, 128, 128, 0.1)', 'font-weight': 'bold'})
     styled_table = styled_table.set_properties(subset=['1월', '2월', '3월', '4월'], **{'background-color': 'rgba(54, 162, 235, 0.05)'})
     styled_table = styled_table.set_properties(subset=['1분기 합계'], **{'background-color': 'rgba(255, 159, 64, 0.1)', 'font-weight': 'bold'})
     
-    # 💡 누적 합계에만 강렬한 랭킹 그라데이션 적용!
-    styled_table = styled_table.background_gradient(subset=['누적 합계'], cmap=color_map)
+    # 체크박스를 켰을 때 나오는 '총계약건수'는 연두색으로 분리해서 표시
+    if show_count:
+        styled_table = styled_table.set_properties(subset=['총계약건수'], **{'background-color': 'rgba(76, 175, 80, 0.1)', 'font-weight': 'bold'})
+    
+    # 누적 합계는 '랭킹'을 상징하므로 강렬한 그라데이션 고정!
+    styled_table = styled_table.background_gradient(subset=['누적 합계'], cmap='Blues')
     
     st.dataframe(styled_table, use_container_width=True, hide_index=True)
 
