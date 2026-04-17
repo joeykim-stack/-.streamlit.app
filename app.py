@@ -20,7 +20,7 @@ st.markdown("""
 # --- 2. 분석 대상 업체 ---
 TARGET_COMPANIES = [
     "주식회사 티제이원", "주식회사 파로스", "주식회사 포딕스시스템", "주식회사 세오", 
-    "주식회사 펜타게이트", "주식회사 홍석", "주식회사 솔디아", "주식회사 디라직", 
+    "주식회사 펜타게이트", "주식회사 홍석", "주식회사 솔디아", "주식회사 정현씨앤씨", "주식회사 디라직", 
     "주식회사 새움", "주식회사 디지탈라인", "주식회사 지인테크", "(주)비엔에스테크", 
     "주식회사 시큐인포", "주식회사 명광", "주식회사 올인원 코리아(ALL-IN-ONE KOREA CO., LTD.)", 
     "주식회사 포커스에이아이", "주식회사 한국아이티에스", "(주)앤다스", "주식회사 다누시스", 
@@ -113,15 +113,14 @@ df_hist = load_historical_data()
 df_api, api_msg = update_realtime_data()
 df_total = pd.concat([df_hist, df_api], ignore_index=True) if not df_api.empty else df_hist.copy()
 
-st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v8.3</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v8.4</div>", unsafe_allow_html=True)
 st.markdown(f"<div class='update-time'>🕒 마지막 업데이트: {st.session_state.last_update} | 상태: {api_msg}</div>", unsafe_allow_html=True)
 
-# --- 6. 사이드바 필터 (v6.6 깔끔한 디자인 롤백!) ---
+# --- 6. 사이드바 필터 ---
 with st.sidebar:
     st.markdown("### 🔍 품목 필터")
     all_items = sorted(df_total['물품분류명'].dropna().astype(str).unique()) if not df_total.empty else []
     
-    # 촌스러운 버튼 2개 제거하고, 세련된 체크박스 1개로 변경
     select_all = st.checkbox("☑️ 전체 품목 선택", value=True)
     if select_all:
         selected = st.multiselect("품목 상세", options=all_items, default=all_items, label_visibility="collapsed")
@@ -130,7 +129,6 @@ with st.sidebar:
     
     st.markdown("---")
     
-    # 💡 잃어버렸던 '매출액/건수' 토글 뷰 메뉴 완벽 부활!
     st.markdown("### 📊 분석 기준")
     view_mode = st.radio("데이터 표출 방식", ["💰 매출액(원)", "📝 계약건수(건)"])
 
@@ -159,7 +157,7 @@ else:
     fig_combo.add_trace(go.Scatter(x=monthly_df['월'], y=monthly_df['건수'], name='계약건수(건)', mode='lines+markers+text', text=monthly_df['건수'], textposition='top center', marker_color='#ef4444', yaxis='y2'))
     fig_combo.update_layout(yaxis=dict(title='매출액(원)', showgrid=False), yaxis2=dict(title='계약건수(건)', overlaying='y', side='right', showgrid=False), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1), margin=dict(l=0, r=0, t=30, b=0))
     
-    # 🏆 도넛 & 바 차트 (선택된 보기 모드에 따라 차트도 연동!)
+    # 🏆 도넛 차트
     col_a, col_b = st.columns(2)
     with col_a:
         st.subheader("📈 월별 실적 추이")
@@ -177,7 +175,7 @@ else:
 
     st.markdown("---")
 
-    # 📋 업체별 월별 피벗 테이블 (색상 스타일링 & 건수/매출 토글 기능 완벽 복구!)
+    # 📋 4. 업체별 피벗 테이블 (디자인 최적화 완료!)
     st.subheader(f"📋 업체별 종합 실적 랭킹 보드 ({view_mode})")
     
     val_col = '금액' if view_mode == "💰 매출액(원)" else '납품요구번호'
@@ -197,17 +195,23 @@ else:
     cols_order = ['랭킹 No.', '업체명', '1월', '2월', '3월', '1분기 합계', '4월', '누적 합계']
     final_table = final_table[cols_order]
     
-    # 💡 엑셀처럼 숫자에 배경색을 입히는 '아름다운 컬러 서식' 복원!
     color_map = 'Blues' if view_mode == "💰 매출액(원)" else 'Greens'
     format_str = "{:,.0f}" if view_mode == "💰 매출액(원)" else "{:,}"
     
-    styled_table = (final_table.style
-                    .format({col: format_str for col in ['1월', '2월', '3월', '1분기 합계', '4월', '누적 합계']})
-                    .background_gradient(subset=['1월', '2월', '3월', '1분기 합계', '4월', '누적 합계'], cmap=color_map, axis=0))
+    # 숫자 포맷 적용
+    styled_table = final_table.style.format({col: format_str for col in ['1월', '2월', '3월', '1분기 합계', '4월', '누적 합계']})
+    
+    # 💡 [디자인 핵심] 구역별로 깔끔하게 배경색 지정 (눈이 편안한 반투명 색상 사용)
+    styled_table = styled_table.set_properties(subset=['업체명'], **{'background-color': 'rgba(128, 128, 128, 0.1)', 'font-weight': 'bold'})
+    styled_table = styled_table.set_properties(subset=['1월', '2월', '3월', '4월'], **{'background-color': 'rgba(54, 162, 235, 0.05)'})
+    styled_table = styled_table.set_properties(subset=['1분기 합계'], **{'background-color': 'rgba(255, 159, 64, 0.1)', 'font-weight': 'bold'})
+    
+    # 💡 누적 합계에만 강렬한 랭킹 그라데이션 적용!
+    styled_table = styled_table.background_gradient(subset=['누적 합계'], cmap=color_map)
     
     st.dataframe(styled_table, use_container_width=True, hide_index=True)
 
-    # 💾 엑셀 다운로드
+    # 💾 5. 엑셀 다운로드
     def to_excel(df):
         output = BytesIO()
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
