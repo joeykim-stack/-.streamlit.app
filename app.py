@@ -11,19 +11,17 @@ from io import BytesIO
 st.set_page_config(page_title="조달청 실적 분석 대시보드", layout="wide")
 
 def get_now_kst():
-    # 서버(UTC) 시간에 9시간을 더해 한국 시간 반환
     return datetime.now() + timedelta(hours=9)
 
 st.markdown("""
     <style>
     .main-title { font-size: 2.2rem; font-weight: 800; margin-bottom: 0.5rem; }
     .update-time { color: #6c757d; font-size: 0.9rem; margin-bottom: 2rem; }
-    /* 체크박스 리스트 가독성 향상 */
     .stCheckbox { margin-bottom: -15px; }
     </style>
 """, unsafe_allow_html=True)
 
-# --- 2. 분석 대상 업체 (52개사) ---
+# --- 2. 분석 대상 업체 ---
 TARGET_COMPANIES = [
     "주식회사 티제이원", "주식회사 파로스", "주식회사 포딕스시스템", "주식회사 세오", 
     "주식회사 펜타게이트", "주식회사 홍석", "주식회사 솔디아", "주식회사 정현씨앤씨", "주식회사 디라직", 
@@ -40,7 +38,7 @@ TARGET_COMPANIES = [
     "비티에스 주식회사", "주식회사 인텔리빅스", "주식회사 비알인포텍"
 ]
 
-# --- 3. [로컬 데이터] 명시적 월별 맵핑 ---
+# --- 3. [로컬 데이터] ---
 @st.cache_data(ttl=3600)
 def load_historical_data():
     file_month_map = {
@@ -64,7 +62,6 @@ def load_historical_data():
             req_col = '납품요구번호' if '납품요구번호' in df.columns else ('주문번호' if '주문번호' in df.columns else None)
             if not req_col: continue 
 
-            # 금액 필드 정합성 확보 (납품증감금액 우선)
             if '납품증감금액' in df.columns: df['금액'] = pd.to_numeric(df['납품증감금액'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
             elif '합계납품증감금액' in df.columns: df['금액'] = pd.to_numeric(df['합계납품증감금액'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
             elif '납품요구금액' in df.columns: df['금액'] = pd.to_numeric(df['납품요구금액'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
@@ -79,7 +76,7 @@ def load_historical_data():
         except Exception: continue
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
-# --- 4. [실시간 API] 전수조사(Pagination) 싹쓸이 로직 ---
+# --- 4. [실시간 API] ---
 def update_realtime_data():
     if 'api_df' not in st.session_state: st.session_state.api_df = pd.DataFrame()
     if 'last_update' not in st.session_state: st.session_state.last_update = "업데이트 전"
@@ -92,7 +89,6 @@ def update_realtime_data():
     try:
         API_KEY = "c1b379f7734c7d624ddefea07510eae71b6e12c5fb89970319d76c5ae8db5248"
         URL = "http://apis.data.go.kr/1230000/at/ShoppingMallPrdctInfoService/getDlvrReqInfoList"
-        
         all_new_data = []
         page_no = 1
         
@@ -133,44 +129,38 @@ df_hist = load_historical_data()
 df_api, api_msg = update_realtime_data()
 df_total = pd.concat([df_hist, df_api], ignore_index=True) if not df_api.empty else df_hist.copy()
 
-st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v9.0</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v9.2</div>", unsafe_allow_html=True)
 st.markdown(f"<div class='update-time'>🕒 마지막 업데이트(KST): {st.session_state.last_update} | 상태: {api_msg}</div>", unsafe_allow_html=True)
 
-# --- 6. 사이드바: 체크박스 나열형 품목 필터 (v6.6 UI 완벽 복구) ---
+# --- 6. 사이드바 ---
 with st.sidebar:
     st.header("🔍 품목 상세 필터")
-    
     if df_total.empty:
         st.error("⚠️ 데이터를 찾을 수 없습니다.")
         selected_items = []
     else:
         all_items = sorted(df_total['물품분류명'].dropna().unique())
-        
-        # 💡 전체 선택 / 해제 버튼
         col_s1, col_s2 = st.columns(2)
         if col_s1.button("✅ 전체 품목 선택"):
             for item in all_items: st.session_state[f"cb_{item}"] = True
         if col_s2.button("❌ 전체 품목 삭제"):
             for item in all_items: st.session_state[f"cb_{item}"] = False
 
-        # 💡 개별 체크박스 리스트 생성
         st.write("---")
         selected_items = []
         for item in all_items:
-            # 세션 스테이트를 활용해 버튼과 체크박스 연동
             cb_key = f"cb_{item}"
             if cb_key not in st.session_state: st.session_state[cb_key] = True
-            
-            if st.checkbox(item, key=cb_key):
-                selected_items.append(item)
+            if st.checkbox(item, key=cb_key): selected_items.append(item)
 
-# --- 7. 메인 화면: 시각화 및 랭킹 보드 ---
+# --- 7. 메인 화면 ---
 if not selected_items:
     st.info("👈 왼쪽 사이드바에서 분석할 품목을 1개 이상 선택해주세요.")
 else:
-    df_f = df_total[df_total['물품분류명'].isin(selected_items)]
+    df_f = df_total[df_total['물품분류명'].isin(selected_items)].copy()
+    df_f['분기'] = df_f['월'].apply(lambda x: '1분기' if x in ['1월', '2월', '3월'] else '2분기')
+    df_f['총계'] = '총합계'
     
-    # 상단 메트릭
     t_cnt = df_f['납품요구번호'].nunique()
     t_amt = df_f['금액'].sum()
     c1, c2, c3 = st.columns(3)
@@ -179,35 +169,54 @@ else:
     c3.metric("📊 건당 평균 실적", f"{(t_amt/t_cnt if t_cnt>0 else 0):,.0f} 원")
     st.markdown("---")
 
-    # 차트 영역
+    # 📈 차트 영역
     col_a, col_b = st.columns(2)
     with col_a:
-        st.subheader("📈 월별 실적 추이")
-        m_df = df_f.groupby('월').agg(금액=('금액', 'sum'), 건수=('납품요구번호', 'nunique')).reset_index().sort_values('월')
+        st.subheader("📈 실적 추이")
+        trend_view = st.radio("조회 기준", ["월별", "분기별", "총합계"], horizontal=True, label_visibility="collapsed")
+        time_col = '월' if trend_view == '월별' else ('분기' if trend_view == '분기별' else '총계')
+        m_df = df_f.groupby(time_col).agg(금액=('금액', 'sum'), 건수=('납품요구번호', 'nunique')).reset_index()
+        if trend_view == '월별': m_df = m_df.sort_values('월')
+        elif trend_view == '분기별': m_df = m_df.sort_values('분기')
         fig = go.Figure()
-        fig.add_trace(go.Bar(x=m_df['월'], y=m_df['금액'], name='매출액', marker_color='#3b82f6', yaxis='y1'))
-        fig.add_trace(go.Scatter(x=m_df['월'], y=m_df['건수'], name='건수', mode='lines+markers+text', text=m_df['건수'], marker_color='#ef4444', yaxis='y2'))
-        fig.update_layout(yaxis=dict(title='매출액'), yaxis2=dict(title='건수', overlaying='y', side='right'), legend=dict(orientation="h", y=1.1, x=1))
+        fig.add_trace(go.Bar(x=m_df[time_col], y=m_df['금액'], name='매출액', marker_color='#3b82f6', yaxis='y1'))
+        fig.add_trace(go.Scatter(x=m_df[time_col], y=m_df['건수'], name='건수', mode='lines+markers+text', text=m_df['건수'], textposition='top center', marker_color='#ef4444', yaxis='y2'))
+        fig.update_layout(yaxis=dict(title='매출액', showgrid=False), yaxis2=dict(title='건수', overlaying='y', side='right', showgrid=False), legend=dict(orientation="h", y=1.15, x=1), margin=dict(t=20, b=0))
         st.plotly_chart(fig, use_container_width=True)
+        
     with col_b:
         st.subheader("🍩 시장 점유율")
-        top10_pie = df_f.groupby('업체명')['금액'].sum().nlargest(10).reset_index()
-        st.plotly_chart(px.pie(top10_pie, names='업체명', values='금액', hole=0.4), use_container_width=True)
+        pie_view = st.selectbox("분석 기간 선택", ["총합계 (전체)", "1분기 (1~3월)", "2분기 (4월~)", "1월", "2월", "3월", "4월"], label_visibility="collapsed")
+        if pie_view == "총합계 (전체)": pie_df = df_f
+        elif "1분기" in pie_view: pie_df = df_f[df_f['분기'] == '1분기']
+        elif "2분기" in pie_view: pie_df = df_f[df_f['분기'] == '2분기']
+        else: pie_df = df_f[df_f['월'] == pie_view]
+        
+        if pie_df.empty: st.info(f"선택하신 '{pie_view}' 기간의 실적 데이터가 없습니다.")
+        else:
+            top10_pie = pie_df.groupby('업체명')['금액'].sum().nlargest(10).reset_index()
+            fig_pie = px.pie(top10_pie, names='업체명', values='금액', hole=0.4, color_discrete_sequence=px.colors.qualitative.Pastel)
+            fig_pie.update_traces(textposition='inside', textinfo='percent+label')
+            fig_pie.update_layout(showlegend=False, margin=dict(t=20, b=0))
+            st.plotly_chart(fig_pie, use_container_width=True)
 
     st.markdown("---")
 
-    # 📋 8. 업체별 종합 랭킹 보드 (교차 피벗 + 조건부 서식)
+    # 📋 8. 업체별 종합 랭킹 보드 (💡 랭킹 동적 정렬 및 하이라이트 기능 완벽 구현!)
     st.subheader("📋 업체별 종합 실적 랭킹 보드")
-    show_cnt = st.checkbox("📝 표에 월별/분기별 계약건수 함께 보기 (체크 시 칼럼 확장)", value=False)
     
-    # 매출액 피벗
+    # UI 배치: 체크박스와 정렬 기준 드롭다운
+    ctrl_col1, ctrl_col2 = st.columns([1, 1])
+    with ctrl_col1:
+        show_cnt = st.checkbox("📝 표에 월별/분기별 계약건수 함께 보기", value=False)
+        
+    # 데이터 피벗 (금액 & 건수)
     p_amt = pd.pivot_table(df_f, values='금액', index='업체명', columns='월', aggfunc='sum', fill_value=0).reset_index()
     for m in ['1월', '2월', '3월', '4월']:
         if m not in p_amt.columns: p_amt[m] = 0
     p_amt['1분기 합계'] = p_amt['1월'] + p_amt['2월'] + p_amt['3월']
     p_amt['누적 합계'] = p_amt['1분기 합계'] + p_amt['4월']
     
-    # 건수 피벗
     p_cnt = pd.pivot_table(df_f, values='납품요구번호', index='업체명', columns='월', aggfunc='nunique', fill_value=0).reset_index()
     for m in ['1월', '2월', '3월', '4월']:
         if m not in p_cnt.columns: p_cnt[m] = 0
@@ -215,28 +224,37 @@ else:
     p_cnt['누적(건)'] = p_cnt['1분기(건)'] + p_cnt['4월']
     p_cnt.rename(columns={'1월':'1월(건)', '2월':'2월(건)', '3월':'3월(건)', '4월':'4월(건)'}, inplace=True)
     
-    # 병합 및 정렬
     final = pd.merge(p_amt, p_cnt, on='업체명', how='outer').fillna(0)
-    final = final.sort_values('누적 합계', ascending=False).reset_index(drop=True)
+    
+    # 표시할 칼럼 정의
+    if show_cnt:
+        disp_cols = ['업체명', '1월', '1월(건)', '2월', '2월(건)', '3월', '3월(건)', '1분기 합계', '1분기(건)', '4월', '4월(건)', '누적 합계', '누적(건)']
+    else:
+        disp_cols = ['업체명', '1월', '2월', '3월', '1분기 합계', '4월', '누적 합계']
+        
+    final = final[disp_cols]
+
+    # 💡 백엔드 동적 랭킹 정렬기
+    with ctrl_col2:
+        sort_options = [c for c in disp_cols if c != '업체명']
+        default_idx = sort_options.index('누적 합계')
+        sort_target = st.selectbox("⬇️ 실적 랭킹 정렬 기준 (선택 시 랭킹 및 그라데이션 자동 변경)", options=sort_options, index=default_idx)
+    
+    # 💡 데이터 정렬 및 랭킹 No. 실시간 재부여
+    final = final.sort_values(sort_target, ascending=False).reset_index(drop=True)
     final.insert(0, '랭킹 No.', range(1, len(final) + 1))
     
-    # 표시 칼럼 결정
-    if show_cnt:
-        disp_cols = ['랭킹 No.', '업체명', '1월', '1월(건)', '2월', '2월(건)', '3월', '3월(건)', '1분기 합계', '1분기(건)', '4월', '4월(건)', '누적 합계', '누적(건)']
-    else:
-        disp_cols = ['랭킹 No.', '업체명', '1월', '2월', '3월', '1분기 합계', '4월', '누적 합계']
-    
-    final = final[disp_cols]
-    
-    # 아름다운 스타일링
-    fmt_map = {c: "{:,.0f}" for c in disp_cols if c not in ['랭킹 No.', '업체명']}
+    # 스타일링
+    fmt_map = {c: "{:,.0f}" for c in final.columns if c not in ['랭킹 No.', '업체명']}
     styled = final.style.format(fmt_map)
     styled = styled.set_properties(subset=['업체명'], **{'background-color': 'rgba(128, 128, 128, 0.1)', 'font-weight': 'bold'})
-    styled = styled.set_properties(subset=[c for c in disp_cols if '월' in c and '(' not in c], **{'background-color': 'rgba(54, 162, 235, 0.05)'})
+    styled = styled.set_properties(subset=[c for c in final.columns if '월' in c and '(' not in c], **{'background-color': 'rgba(54, 162, 235, 0.05)'})
     styled = styled.set_properties(subset=['1분기 합계'], **{'background-color': 'rgba(255, 159, 64, 0.1)', 'font-weight': 'bold'})
     if show_cnt:
-        styled = styled.set_properties(subset=[c for c in disp_cols if '(건)' in c], **{'background-color': 'rgba(76, 175, 80, 0.05)'})
-    styled = styled.background_gradient(subset=['누적 합계'], cmap='Blues')
+        styled = styled.set_properties(subset=[c for c in final.columns if '(건)' in c], **{'background-color': 'rgba(76, 175, 80, 0.05)'})
+        
+    # 💡 스마트 하이라이트: 사용자가 선택한 정렬 기준 칼럼에 파란색 그라데이션 적용!
+    styled = styled.background_gradient(subset=[sort_target], cmap='Blues')
     
     st.dataframe(styled, use_container_width=True, hide_index=True)
 
