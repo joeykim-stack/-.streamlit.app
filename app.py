@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import requests
 import xml.etree.ElementTree as ET
-from datetime import datetime, timedelta # timedelta 추가
+from datetime import datetime, timedelta
 import plotly.express as px
 import plotly.graph_objects as go
 from io import BytesIO
@@ -10,9 +10,7 @@ from io import BytesIO
 # --- 1. 기본 설정 ---
 st.set_page_config(page_title="조달청 실적 분석 대시보드", layout="wide")
 
-# 한국 시간 구하기 함수 (서버 시차 문제 해결)
 def get_now_kst():
-    # 서버 시간(UTC)에 9시간을 더해 한국 시간(KST)으로 반환
     return datetime.now() + timedelta(hours=9)
 
 st.markdown("""
@@ -39,7 +37,7 @@ TARGET_COMPANIES = [
     "비티에스 주식회사", "주식회사 인텔리빅스", "주식회사 비알인포텍"
 ]
 
-# --- 3. 로컬 데이터 로직 ---
+# --- 3. [무적 엔진] 로컬 데이터 로직 ---
 @st.cache_data(ttl=3600)
 def load_historical_data():
     file_month_map = {
@@ -62,6 +60,7 @@ def load_historical_data():
             if '품명' in df.columns and '물품분류명' not in df.columns: df.rename(columns={'품명': '물품분류명'}, inplace=True)
             req_col = '납품요구번호' if '납품요구번호' in df.columns else ('주문번호' if '주문번호' in df.columns else None)
             if not req_col: continue 
+
             if '납품증감금액' in df.columns: df['금액'] = pd.to_numeric(df['납품증감금액'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
             elif '합계납품증감금액' in df.columns: df['금액'] = pd.to_numeric(df['합계납품증감금액'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
             elif '납품요구금액' in df.columns: df['금액'] = pd.to_numeric(df['납품요구금액'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
@@ -75,49 +74,79 @@ def load_historical_data():
         except Exception: continue
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
-# --- 4. 실시간 API 업데이트 로직 (시간 동기화 패치) ---
+# --- 4. 실시간 API 업데이트 로직 (💡 1페이지 증후군 해결: 전수조사 패치) ---
 def update_realtime_data():
     if 'api_df' not in st.session_state: st.session_state.api_df = pd.DataFrame()
     if 'last_update' not in st.session_state: st.session_state.last_update = "업데이트 전"
     if 'retry_time' not in st.session_state: st.session_state.retry_time = None
     
-    # 💡 한국 시간 시계 적용
     now = get_now_kst()
-    
     if st.session_state.retry_time and now < st.session_state.retry_time:
-        return st.session_state.api_df, f"⏳ 재시도 대기 중 (다음 한국시간: {st.session_state.retry_time.strftime('%H:%M:%S')})"
+        return st.session_state.api_df, f"⏳ 대기 중 (다음 시도: {st.session_state.retry_time.strftime('%H:%M:%S')})"
     
     try:
         API_KEY = "c1b379f7734c7d624ddefea07510eae71b6e12c5fb89970319d76c5ae8db5248"
         URL = "http://apis.data.go.kr/1230000/at/ShoppingMallPrdctInfoService/getDlvrReqInfoList"
-        params = {'serviceKey': API_KEY, 'numOfRows': '100', 'inqryDiv': '1', 'inqryBgnDate': '20260415', 'inqryEndDate': now.strftime('%Y%m%d')}
-        res = requests.get(URL, params=params, timeout=5)
-        if res.status_code == 200:
-            root = ET.fromstring(res.content)
-            items = root.findall('.//item')
-            new_data = []
-            for item in items:
-                corp = item.findtext('corpNm', '').strip()
-                if corp in TARGET_COMPANIES:
-                    new_data.append({'업체명': corp, '물품분류명': item.findtext('prdctClsfcNm', ''), '금액': float(item.findtext('dlvrReqAmt', 0)), '납품요구번호': item.findtext('dlvrReqNo', f'API_{now.timestamp()}'), '월': '4월'})
-            if new_data:
-                st.session_state.api_df = pd.DataFrame(new_data)
-                st.session_state.last_update = now.strftime('%H:%M:%S')
-                return st.session_state.api_df, "🟢 실시간 4월 실적 병합 완료"
-            return pd.DataFrame(), "🔵 금일 추가 실적 없음"
-        else:
-            st.session_state.retry_time = now + timedelta(minutes=30)
-            return pd.DataFrame(), f"⚠️ 서버 점검 중 (500) - 30분 뒤 한국시간 재시도"
-    except:
+        
+        all_new_data = []
+        page_no = 1
+        
+        # 💡 while문을 통해 마지막 페이지가 나올 때까지 싹쓸이!
+        while True:
+            params = {
+                'serviceKey': API_KEY, 
+                'numOfRows': '999',  # 한 번에 최대치로 긁어오기
+                'pageNo': str(page_no),
+                'inqryDiv': '1', 
+                'inqryBgnDate': '20260415', 
+                'inqryEndDate': now.strftime('%Y%m%d')
+            }
+            res = requests.get(URL, params=params, timeout=10)
+            
+            if res.status_code == 200:
+                root = ET.fromstring(res.content)
+                items = root.findall('.//item')
+                
+                if not items:
+                    break # 읽을 데이터가 더 없으면 루프 탈출
+                    
+                for item in items:
+                    corp = item.findtext('corpNm', '').strip()
+                    if corp in TARGET_COMPANIES:
+                        all_new_data.append({
+                            '업체명': corp, 
+                            '물품분류명': item.findtext('prdctClsfcNm', ''), 
+                            '금액': float(item.findtext('dlvrReqAmt', 0)), 
+                            '납품요구번호': item.findtext('dlvrReqNo', f'API_{now.timestamp()}'), 
+                            '월': '4월'
+                        })
+                
+                # API가 알려주는 전체 데이터 개수를 확인해서, 끝까지 도달했으면 탈출
+                total_count = int(root.findtext('.//totalCount', '0'))
+                if page_no * 999 >= total_count:
+                    break
+                    
+                page_no += 1
+            else:
+                break # 500 등 에러 발생 시 루프 중단
+
+        if all_new_data:
+            st.session_state.api_df = pd.DataFrame(all_new_data)
+            st.session_state.last_update = now.strftime('%H:%M:%S')
+            return st.session_state.api_df, f"🟢 실시간 4월 싹쓸이 완료 (총 {page_no}페이지)"
+        
+        return pd.DataFrame(), "🔵 금일 추가 실적 없음"
+        
+    except Exception as e:
         st.session_state.retry_time = now + timedelta(minutes=30)
-        return pd.DataFrame(), "⚠️ 통신 일시 장애 - 30분 뒤 한국시간 재시도"
+        return pd.DataFrame(), "⚠️ 통신 장애 - 30분 뒤 재시도"
 
 # --- 5. 데이터 통합 ---
 df_hist = load_historical_data()
 df_api, api_msg = update_realtime_data()
 df_total = pd.concat([df_hist, df_api], ignore_index=True) if not df_api.empty else df_hist.copy()
 
-st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v8.7</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v8.8</div>", unsafe_allow_html=True)
 st.markdown(f"<div class='update-time'>🕒 마지막 업데이트(한국시간): {st.session_state.last_update} | 상태: {api_msg}</div>", unsafe_allow_html=True)
 
 # --- 6. 사이드바 필터 ---
