@@ -1,59 +1,195 @@
 import streamlit as st
 import pandas as pd
-import os
+import requests
+import xml.etree.ElementTree as ET
+from datetime import datetime, timedelta
+import plotly.express as px
+from io import BytesIO
 
-st.set_page_config(page_title="데이터 진단 시스템", layout="wide")
+# --- 1. 기본 설정 ---
+st.set_page_config(page_title="조달청 실적 분석 대시보드", layout="wide")
 
-st.markdown("# 🚨 긴급 진단 모드: 데이터가 왜 안 보일까?")
-st.markdown("파이썬이 혼자 숨기고 있던 에러와 파일 상태를 전부 화면에 출력합니다.")
-st.markdown("---")
+st.markdown("""
+    <style>
+    .main-title { font-size: 2.2rem; font-weight: 800; margin-bottom: 0.5rem; }
+    .update-time { color: #6c757d; font-size: 0.9rem; margin-bottom: 2rem; }
+    </style>
+""", unsafe_allow_html=True)
 
-# 1. 파일 존재 여부 확인
-st.markdown("### 🔍 1단계: 현재 폴더 파일 목록 확인")
-current_files = os.listdir('.')
-st.write("현재 파이썬이 보고 있는 폴더 안의 파일들:", current_files)
+# --- 2. 분석 대상 업체 ---
+TARGET_COMPANIES = [
+    "주식회사 티제이원", "주식회사 파로스", "주식회사 포딕스시스템", "주식회사 세오", 
+    "주식회사 펜타게이트", "주식회사 홍석", "주식회사 솔디아", "주식회사 디라직", 
+    "주식회사 새움", "주식회사 디지탈라인", "주식회사 지인테크", "(주)비엔에스테크", 
+    "주식회사 시큐인포", "주식회사 명광", "주식회사 올인원 코리아(ALL-IN-ONE KOREA CO., LTD.)", 
+    "주식회사 포커스에이아이", "주식회사 한국아이티에스", "(주)앤다스", "주식회사 다누시스", 
+    "이노뎁(주)", "주식회사 핀텔", "주식회사 오티에스", "주식회사 에스카", "에코아이넷(주)", 
+    "미르텍 주식회사", "주식회사 아이즈온솔루션", "주식회사 그린아이티코리아", "주식회사 제노시스", 
+    "(주)지성이엔지", "주식회사 알엠텍", "(주)원우이엔지", "(주)포소드", "주식회사 두원전자통신", 
+    "대신네트웍스주식회사", "주식회사 마이크로시스템", "주식회사 크리에이티브넷", "주식회사센텍", 
+    "(주)경림이앤지", "주식회사 웹게이트", "한국씨텍(주)", "뉴코리아전자통신 주식회사", 
+    "주식회사 제이한테크", "주식회사 아라드네트웍스", "주식회사 진명아이앤씨", "렉스젠 주식회사", 
+    "주식회사 디케이앤트", "사이테크놀로지스 주식회사", "주식회사 송우인포텍", "주식회사 아이엔아이", 
+    "비티에스 주식회사", "주식회사 인텔리빅스", "주식회사 비알인포텍"
+]
 
-st.markdown("---")
-st.markdown("### 🛠️ 2단계: CSV 파일 정밀 분석")
-target_files = ['data.csv', 'data02.csv', 'data02.cvs', 'data03.csv', 'data04.csv']
-
-for file in target_files:
-    if file in current_files:
-        st.success(f"🟢 **{file}** 파일이 존재합니다!")
-        
+# --- 3. [즉시 로드] 로컬 데이터 로직 (어제 성공했던 무적 로직 부활!) ---
+@st.cache_data(ttl=3600)
+def load_historical_data():
+    files = ['data.csv', 'data02.csv', 'data02.cvs', 'data03.csv', 'data04.csv']
+    dfs = []
+    
+    for idx, file in enumerate(files):
         try:
-            # 인코딩 테스트
-            try:
-                df = pd.read_csv(file, encoding='utf-8')
-                enc = 'UTF-8'
-            except UnicodeDecodeError:
-                df = pd.read_csv(file, encoding='cp949')
-                enc = 'CP949(윈도우 한글)'
-                
-            st.info(f"✅ 인코딩 '{enc}' 형식으로 파일 읽기 성공! (데이터 크기: 총 {df.shape[0]}줄)")
+            # 어제 우리가 알아냈던 진짜 구조: UTF-16 인코딩에 탭(\t) 구분자!
+            df = None
+            try_configs = [
+                {'encoding': 'utf-16', 'sep': '\t'},
+                {'encoding': 'cp949', 'sep': ','},
+                {'encoding': 'utf-8', 'sep': ','}
+            ]
             
-            # 컬럼명 출력 (가장 의심되는 부분!)
-            df.rename(columns=lambda x: str(x).strip(), inplace=True)
-            columns = list(df.columns)
-            st.write(f"**[{file} 파일의 실제 컬럼명 목록]** (여기서 이름이 다르면 데이터를 못 가져옵니다)")
-            st.write(columns)
+            for config in try_configs:
+                try:
+                    temp_df = pd.read_csv(file, encoding=config['encoding'], sep=config['sep'], on_bad_lines='skip', low_memory=False)
+                    if len(temp_df.columns) > 2: # 컬럼이 정상적으로 쪼개졌는지 확인
+                        df = temp_df
+                        break
+                except:
+                    pass
             
-            # 필수 컬럼 검사
-            missing_cols = []
-            if '업체명' not in columns and '계약업체명' not in columns: missing_cols.append("업체명")
-            if '물품분류명' not in columns and '품명' not in columns: missing_cols.append("물품분류명")
-            if '납품요구금액' not in columns and '금액' not in columns: missing_cols.append("납품요구금액")
-            
-            if missing_cols:
-                st.error(f"❌ 우리 코드에 필요한 컬럼({missing_cols})이 이 파일에 없습니다. 위 컬럼 목록을 보고 진짜 이름을 알려주세요!")
-            else:
-                st.success("✅ 필수 컬럼이 모두 정상적으로 존재합니다!")
-                
-        except Exception as e:
-            st.error(f"❌ {file} 파일을 여는 중 알 수 없는 에러 발생: {e}")
-            
-    else:
-        st.warning(f"🔴 **{file}** 파일이 이 폴더에 없습니다. (업로드가 안 되었거나 이름이 다릅니다)")
+            if df is None:
+                continue
 
-st.markdown("---")
-st.info("💡 **중찬아, 이 화면이 뜨면 캡처해서 보여주거나, 빨간색(❌, 🔴)으로 뜬 에러 내용만 긁어서 나한테 꼭 알려줘! 10초 만에 원인 찾아줄게!**")
+            df.rename(columns=lambda x: str(x).strip(), inplace=True)
+            amt_col = '납품요구금액' if '납품요구금액' in df.columns else ('금액' if '금액' in df.columns else None)
+            
+            if amt_col is None:
+                continue
+                
+            temp_df = df[['업체명', '물품분류명', amt_col]].copy()
+            temp_df.columns = ['업체명', '물품분류명', '금액']
+            temp_df['월'] = f"{idx+1}월"
+            temp_df['업체명'] = temp_df['업체명'].astype(str).str.strip()
+            
+            dfs.append(temp_df[temp_df['업체명'].isin(TARGET_COMPANIES)])
+            
+        except Exception: 
+            continue
+            
+    return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+
+# --- 4. [백그라운드] 실시간 API 업데이트 로직 ---
+def update_realtime_data():
+    if 'api_df' not in st.session_state: st.session_state.api_df = pd.DataFrame()
+    if 'last_update' not in st.session_state: st.session_state.last_update = "업데이트 전"
+    if 'retry_time' not in st.session_state: st.session_state.retry_time = None
+
+    now = datetime.now()
+    
+    if st.session_state.retry_time and now < st.session_state.retry_time:
+        return st.session_state.api_df, f"⏳ 재시도 대기 중 (다음: {st.session_state.retry_time.strftime('%H:%M:%S')})"
+
+    try:
+        API_KEY = "c1b379f7734c7d624ddefea07510eae71b6e12c5fb89970319d76c5ae8db5248"
+        URL = "http://apis.data.go.kr/1230000/at/ShoppingMallPrdctInfoService/getDlvrReqInfoList"
+        params = {'serviceKey': API_KEY, 'numOfRows': '100', 'inqryDiv': '1', 
+                  'inqryBgnDate': '20260415', 'inqryEndDate': now.strftime('%Y%m%d')}
+        res = requests.get(URL, params=params, timeout=5)
+        
+        if res.status_code == 200:
+            root = ET.fromstring(res.content)
+            items = root.findall('.//item')
+            new_data = []
+            for item in items:
+                corp = item.findtext('corpNm', '').strip()
+                if corp in TARGET_COMPANIES:
+                    new_data.append({'업체명': corp, '물품분류명': item.findtext('prdctClsfcNm', ''),
+                                     '금액': float(item.findtext('dlvrReqAmt', 0)), '월': '4월(실시간)'})
+            
+            if new_data:
+                st.session_state.api_df = pd.DataFrame(new_data)
+                st.session_state.last_update = now.strftime('%H:%M:%S')
+                return st.session_state.api_df, "🟢 실시간 업데이트 완료"
+            return pd.DataFrame(), "🔵 최신 실적 없음 (동기화 대기)"
+        else:
+            st.session_state.retry_time = now + timedelta(minutes=30)
+            return pd.DataFrame(), f"⚠️ 서버 점검 중 (500) - 30분 뒤 재시도"
+    except:
+        st.session_state.retry_time = now + timedelta(minutes=30)
+        return pd.DataFrame(), "⚠️ 통신 일시 장애 - 30분 뒤 재시도"
+
+# --- 5. 화면 렌더링 시작 (데이터 통합) ---
+df_hist = load_historical_data()
+df_api, api_msg = update_realtime_data()
+
+if not df_api.empty:
+    df_total = pd.concat([df_hist, df_api], ignore_index=True)
+else:
+    df_total = df_hist.copy()
+
+st.markdown(f"<div class='main-title'>🏆 통합 조달 전략 분석 v7.6</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='update-time'>🕒 마지막 업데이트: {st.session_state.last_update} | 상태: {api_msg}</div>", unsafe_allow_html=True)
+
+# --- 6. 사이드바 필터 ---
+with st.sidebar:
+    st.header("🔍 분석 필터")
+    
+    if df_total.empty:
+        st.error("⚠️ 데이터를 찾을 수 없습니다. (data.csv 등 파일 확인 필요)")
+        all_items = []
+    else:
+        all_items = sorted(df_total['물품분류명'].dropna().astype(str).unique())
+    
+    if 'filter_items' not in st.session_state:
+        st.session_state.filter_items = all_items
+    else:
+        valid_items = [item for item in st.session_state.filter_items if item in all_items]
+        st.session_state.filter_items = valid_items
+
+    col1, col2 = st.columns(2)
+    if col1.button("✅ 전체"): st.session_state.filter_items = all_items
+    if col2.button("❌ 해제"): st.session_state.filter_items = []
+
+    selected = st.multiselect(
+        "품목 상세 선택", 
+        options=all_items, 
+        default=st.session_state.filter_items if all_items else []
+    )
+
+# --- 7. 메인 차트 및 데이터 화면 ---
+if df_total.empty:
+    st.warning("🚨 현재 분석할 데이터가 없습니다. 폴더(또는 GitHub)에 'data.csv', 'data02.csv(또는 cvs)', 'data03.csv', 'data04.csv' 파일이 모두 업로드되어 있는지 확인해주세요.")
+
+elif not selected:
+    st.info("👈 왼쪽 필터에서 분석할 품목을 1개 이상 선택해주세요.")
+
+else:
+    df_f = df_total[df_total['물품분류명'].isin(selected)]
+    
+    c1, c2 = st.columns(2)
+    c1.metric("💰 누적 매출액", f"{df_f['금액'].sum():,.0f}원")
+    c2.metric("📝 총 계약 건수", f"{len(df_f):,}건")
+
+    st.markdown("---")
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.subheader("🏆 업체별 매출 순위")
+        top10 = df_f.groupby('업체명')['금액'].sum().nlargest(10).reset_index()
+        fig_bar = px.bar(top10, x='업체명', y='금액', text_auto='.2s', color='금액')
+        fig_bar.update_layout(xaxis_title="업체명", yaxis_title="매출액")
+        st.plotly_chart(fig_bar, use_container_width=True)
+        
+    with col_b:
+        st.subheader("🍩 품목별 점유율")
+        fig_pie = px.pie(df_f, names='물품분류명', values='금액', hole=0.4)
+        fig_pie.update_traces(textposition='inside', textinfo='percent+label')
+        st.plotly_chart(fig_pie, use_container_width=True)
+
+    st.markdown("---")
+
+    st.subheader("📋 상세 분석 데이터")
+    st.dataframe(df_f.sort_values('금액', ascending=False), use_container_width=True)
+
+st.markdown("<br><center style='color:gray;'>Copyright(C) 2026 Joey Kim. Data from Public Data Portal.</center>", unsafe_allow_html=True)
