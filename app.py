@@ -33,11 +33,13 @@ TARGET_COMPANIES = [
     "비티에스 주식회사", "주식회사 인텔리빅스", "주식회사 비알인포텍"
 ]
 
-# --- 3. [즉시 로드] 로컬 데이터 로직 ---
+# --- 3. [즉시 로드] 로컬 데이터 로직 (파일명 수정 완료!) ---
 @st.cache_data(ttl=3600)
 def load_historical_data():
-    files = ['data_mini.csv', 'data02_mini.csv', 'data03_mini.csv', 'data04.csv']
+    # 중찬이가 저장한 정확한 파일명으로 수정! (1월은 data_mini.csv 또는 data01.csv 일 수 있으니 에러 안나게 처리)
+    files = ['data_mini.csv', 'data02.csv', 'data03.csv', 'data04.csv']
     dfs = []
+    
     for idx, file in enumerate(files):
         try:
             df = pd.read_csv(file)
@@ -48,7 +50,22 @@ def load_historical_data():
             temp_df['월'] = f"{idx+1}월"
             temp_df['업체명'] = temp_df['업체명'].astype(str).str.strip()
             dfs.append(temp_df[temp_df['업체명'].isin(TARGET_COMPANIES)])
-        except: continue
+        except FileNotFoundError:
+            # 혹시 1월 파일 이름이 data01.csv 라면 그것도 시도
+            if file == 'data_mini.csv':
+                try:
+                    df = pd.read_csv('data01.csv')
+                    df.rename(columns=lambda x: x.strip(), inplace=True)
+                    amt_col = '납품요구금액' if '납품요구금액' in df.columns else '금액'
+                    temp_df = df[['업체명', '물품분류명', amt_col]].copy()
+                    temp_df.columns = ['업체명', '물품분류명', '금액']
+                    temp_df['월'] = "1월"
+                    temp_df['업체명'] = temp_df['업체명'].astype(str).str.strip()
+                    dfs.append(temp_df[temp_df['업체명'].isin(TARGET_COMPANIES)])
+                except: pass
+            continue
+        except Exception: continue
+        
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
 # --- 4. [백그라운드] 실시간 API 업데이트 로직 ---
@@ -95,13 +112,12 @@ def update_realtime_data():
 df_hist = load_historical_data()
 df_api, api_msg = update_realtime_data()
 
-# 로컬과 API 데이터를 안전하게 병합
 if not df_api.empty:
     df_total = pd.concat([df_hist, df_api], ignore_index=True)
 else:
     df_total = df_hist.copy()
 
-st.markdown(f"<div class='main-title'>🏆 통합 조달 전략 분석 v7.3</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='main-title'>🏆 통합 조달 전략 분석 v7.4</div>", unsafe_allow_html=True)
 st.markdown(f"<div class='update-time'>🕒 마지막 업데이트: {st.session_state.last_update} | 상태: {api_msg}</div>", unsafe_allow_html=True)
 
 # --- 6. 사이드바 필터 (초강력 방어 로직) ---
@@ -109,16 +125,14 @@ with st.sidebar:
     st.header("🔍 분석 필터")
     
     if df_total.empty:
-        st.error("⚠️ 데이터를 찾을 수 없습니다. (CSV 파일 누락 또는 API 대기 중)")
+        st.error("⚠️ 데이터를 찾을 수 없습니다. 파일명을 확인해주세요.")
         all_items = []
     else:
-        # 빈 값 제거 후 리스트화
         all_items = sorted(df_total['물품분류명'].dropna().astype(str).unique())
     
     if 'filter_items' not in st.session_state:
         st.session_state.filter_items = all_items
     else:
-        # 꼬임 방지
         valid_items = [item for item in st.session_state.filter_items if item in all_items]
         st.session_state.filter_items = valid_items
 
@@ -126,7 +140,6 @@ with st.sidebar:
     if col1.button("✅ 전체"): st.session_state.filter_items = all_items
     if col2.button("❌ 해제"): st.session_state.filter_items = []
 
-    # 데이터가 없어도 multiselect가 에러 없이 그려지도록 기본값 빈 배열 처리
     selected = st.multiselect(
         "품목 상세 선택", 
         options=all_items, 
@@ -135,23 +148,20 @@ with st.sidebar:
 
 # --- 7. 메인 차트 및 데이터 화면 ---
 if df_total.empty:
-    st.warning("🚨 현재 분석할 데이터가 없습니다. 폴더에 'data_mini.csv', 'data04.csv' 파일이 있는지 확인하거나, 조달청 실시간 API가 연동될 때까지 기다려주세요.")
+    st.warning("🚨 현재 분석할 데이터가 없습니다. 폴더에 'data_mini.csv', 'data02.csv', 'data03.csv', 'data04.csv' 파일이 모두 있는지 확인해주세요.")
 
 elif not selected:
     st.info("👈 왼쪽 필터에서 분석할 품목을 1개 이상 선택해주세요.")
 
 else:
-    # 선택된 품목만 필터링
     df_f = df_total[df_total['물품분류명'].isin(selected)]
     
-    # 지표 요약
     c1, c2 = st.columns(2)
     c1.metric("💰 누적 매출액", f"{df_f['금액'].sum():,.0f}원")
     c2.metric("📝 총 계약 건수", f"{len(df_f):,}건")
 
     st.markdown("---")
 
-    # 시각화 차트
     col_a, col_b = st.columns(2)
     with col_a:
         st.subheader("🏆 업체별 매출 순위")
@@ -168,7 +178,6 @@ else:
 
     st.markdown("---")
 
-    # 상세 데이터 표
     st.subheader("📋 상세 분석 데이터")
     st.dataframe(df_f.sort_values('금액', ascending=False), use_container_width=True)
 
