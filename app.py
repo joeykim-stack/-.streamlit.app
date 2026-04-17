@@ -20,7 +20,7 @@ st.markdown("""
 # --- 2. 분석 대상 업체 ---
 TARGET_COMPANIES = [
     "주식회사 티제이원", "주식회사 파로스", "주식회사 포딕스시스템", "주식회사 세오", 
-    "주식회사 펜타게이트", "주식회사 홍석", "주식회사 솔디아", "주식회사 디라직", 
+    "주식회사 펜타게이트", "주식회사 홍석", "주식회사 솔디아", "주식회사 정현씨앤씨", "주식회사 디라직", 
     "주식회사 새움", "주식회사 디지탈라인", "주식회사 지인테크", "(주)비엔에스테크", 
     "주식회사 시큐인포", "주식회사 명광", "주식회사 올인원 코리아(ALL-IN-ONE KOREA CO., LTD.)", 
     "주식회사 포커스에이아이", "주식회사 한국아이티에스", "(주)앤다스", "주식회사 다누시스", 
@@ -34,13 +34,21 @@ TARGET_COMPANIES = [
     "비티에스 주식회사", "주식회사 인텔리빅스", "주식회사 비알인포텍"
 ]
 
-# --- 3. [무적 엔진] 로컬 데이터 로직 ---
+# --- 3. [무적 엔진] 로컬 데이터 로직 (월별 명시적 맵핑) ---
 @st.cache_data(ttl=3600)
 def load_historical_data():
-    files = ['data.csv', 'data02.csv', 'data02.cvs', 'data03.csv', 'data04.csv']
+    # 파일 이름에 따라 정확한 '월'을 지정 (5월 버그 완벽 차단)
+    file_month_map = {
+        'data.csv': '1월',
+        'data02.csv': '2월',
+        'data02.cvs': '2월', # 오타 파일도 2월로 처리
+        'data03.csv': '3월',
+        'data04.csv': '4월'
+    }
+    
     dfs = []
     
-    for idx, file in enumerate(files):
+    for file, target_month in file_month_map.items():
         try:
             df = None
             try_configs = [
@@ -67,7 +75,6 @@ def load_historical_data():
             req_col = '납품요구번호' if '납품요구번호' in df.columns else ('주문번호' if '주문번호' in df.columns else None)
             if not req_col: continue 
 
-            # 납품증감금액 100% 반영 로직
             if '납품증감금액' in df.columns:
                 df['금액'] = pd.to_numeric(df['납품증감금액'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
             elif '합계납품증감금액' in df.columns:
@@ -84,7 +91,8 @@ def load_historical_data():
 
             temp_df = df[['업체명', '물품분류명', '금액', req_col]].copy()
             temp_df.columns = ['업체명', '물품분류명', '금액', '납품요구번호']
-            temp_df['월'] = f"{idx+1}월"
+            # 명시적으로 월 부여
+            temp_df['월'] = target_month
             temp_df['업체명'] = temp_df['업체명'].astype(str).str.strip()
             
             dfs.append(temp_df[temp_df['업체명'].isin(TARGET_COMPANIES)])
@@ -123,14 +131,14 @@ def update_realtime_data():
                         '물품분류명': item.findtext('prdctClsfcNm', ''),
                         '금액': float(item.findtext('dlvrReqAmt', 0)), 
                         '납품요구번호': item.findtext('dlvrReqNo', f'API_{now.timestamp()}'),
-                        '월': '4월(실시간)'
+                        '월': '4월' # 💡 4월 데이터와 완벽하게 합쳐지도록 꼬리표 제거!
                     })
             
             if new_data:
                 st.session_state.api_df = pd.DataFrame(new_data)
                 st.session_state.last_update = now.strftime('%H:%M:%S')
-                return st.session_state.api_df, "🟢 실시간 업데이트 완료"
-            return pd.DataFrame(), "🔵 최신 실적 없음 (동기화 대기)"
+                return st.session_state.api_df, "🟢 실시간 4월 실적 병합 완료"
+            return pd.DataFrame(), "🔵 금일 추가 실적 없음"
         else:
             st.session_state.retry_time = now + timedelta(minutes=30)
             return pd.DataFrame(), f"⚠️ 서버 점검 중 (500) - 30분 뒤 재시도"
@@ -145,12 +153,13 @@ df_api, api_msg = update_realtime_data()
 if not df_api.empty: df_total = pd.concat([df_hist, df_api], ignore_index=True)
 else: df_total = df_hist.copy()
 
-st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v8.0</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v8.2</div>", unsafe_allow_html=True)
 st.markdown(f"<div class='update-time'>🕒 마지막 업데이트: {st.session_state.last_update} | 상태: {api_msg}</div>", unsafe_allow_html=True)
 
-# --- 6. 사이드바 필터 ---
+# --- 6. 사이드바 필터 (v6.6 UI 롤백) ---
 with st.sidebar:
-    st.header("🔍 분석 필터")
+    st.markdown("### 🔍 품목 상세 필터")
+    st.markdown("분석할 품목을 선택하세요.")
     
     if df_total.empty:
         st.error("⚠️ 데이터를 찾을 수 없습니다.")
@@ -162,12 +171,17 @@ with st.sidebar:
     else: st.session_state.filter_items = [item for item in st.session_state.filter_items if item in all_items]
 
     col1, col2 = st.columns(2)
-    if col1.button("✅ 전체"): st.session_state.filter_items = all_items
-    if col2.button("❌ 해제"): st.session_state.filter_items = []
+    if col1.button("✅ 전체 선택"): st.session_state.filter_items = all_items
+    if col2.button("❌ 전체 해제"): st.session_state.filter_items = []
 
-    selected = st.multiselect("품목 상세 선택", options=all_items, default=st.session_state.filter_items if all_items else [])
+    selected = st.multiselect(
+        "▼ 품목 리스트", 
+        options=all_items, 
+        default=st.session_state.filter_items if all_items else [],
+        label_visibility="collapsed"
+    )
 
-# --- 7. 메인 차트 및 대시보드 (v6.6 UI 완벽 복구) ---
+# --- 7. 메인 차트 및 대시보드 ---
 if df_total.empty:
     st.warning("🚨 데이터베이스에서 실적을 불러오는 중이거나 파일이 없습니다.")
 elif not selected:
@@ -175,18 +189,18 @@ elif not selected:
 else:
     df_f = df_total[df_total['물품분류명'].isin(selected)]
     
-    # 📊 1. 핵심 지표 (건수 고유값 처리)
+    # 📊 1. 핵심 지표
     total_cnt = df_f['납품요구번호'].nunique()
     total_amt = df_f['금액'].sum()
     avg_amt = total_amt / total_cnt if total_cnt > 0 else 0
     
     c1, c2, c3 = st.columns(3)
-    c1.metric("💰 누적 매출액 (납품증감 합계)", f"{total_amt:,.0f} 원")
-    c2.metric("📝 총 계약 건수 (납품요구번호)", f"{total_cnt:,} 건")
+    c1.metric("💰 누적 매출액", f"{total_amt:,.0f} 원")
+    c2.metric("📝 총 계약 건수", f"{total_cnt:,} 건")
     c3.metric("📊 건당 평균 계약액", f"{avg_amt:,.0f} 원")
     st.markdown("---")
 
-    # 📈 2. 월별 실적 추이 (콤보 차트 복구)
+    # 📈 2. 월별 실적 추이
     st.subheader("📈 월별 실적 추이 (매출 및 건수)")
     monthly_df = df_f.groupby('월').agg(금액=('금액', 'sum'), 건수=('납품요구번호', 'nunique')).reset_index().sort_values('월')
     
@@ -202,7 +216,7 @@ else:
     st.plotly_chart(fig_combo, use_container_width=True)
     st.markdown("---")
 
-    # 🏆 3. Top 10 바 차트 & 시장 점유율 도넛 차트 복구
+    # 🏆 3. Top 10 바 차트 & 시장 점유율 도넛 차트
     col_a, col_b = st.columns(2)
     with col_a:
         st.subheader("🏆 업체별 매출 순위 (Top 10)")
@@ -212,34 +226,44 @@ else:
         st.plotly_chart(fig_bar, use_container_width=True)
         
     with col_b:
-        st.subheader("🍩 품목별 시장 점유율")
-        fig_pie = px.pie(df_f, names='물품분류명', values='금액', hole=0.4, color_discrete_sequence=px.colors.qualitative.Pastel)
+        st.subheader("🍩 선택 품목 시장 점유율")
+        fig_pie = px.pie(top10, names='업체명', values='금액', hole=0.4, color_discrete_sequence=px.colors.qualitative.Pastel)
         fig_pie.update_traces(textposition='inside', textinfo='percent+label')
         fig_pie.update_layout(showlegend=False)
         st.plotly_chart(fig_pie, use_container_width=True)
     st.markdown("---")
 
-    # 📋 4. 업체/품목별 월별 피벗 테이블 복구 (총합계 및 총계약건수 포함)
-    st.subheader("📋 상세 실적 피벗 테이블 (월별/업체별)")
+    # 📋 4. 업체별 월별 피벗 테이블 (1분기 합계 완벽 복원)
+    st.subheader("📋 업체별 종합 실적 랭킹 보드")
     
-    pivot_df = pd.pivot_table(df_f, values='금액', index=['업체명', '물품분류명'], columns='월', aggfunc='sum', fill_value=0).reset_index()
-    month_cols = [col for col in pivot_df.columns if col not in ['업체명', '물품분류명']]
-    pivot_df['매출총합계'] = pivot_df[month_cols].sum(axis=1)
+    pivot_df = pd.pivot_table(df_f, values='금액', index='업체명', columns='월', aggfunc='sum', fill_value=0).reset_index()
     
-    cnt_df = df_f.groupby(['업체명', '물품분류명'])['납품요구번호'].nunique().reset_index().rename(columns={'납품요구번호':'총계약건수'})
-    final_table = pd.merge(pivot_df, cnt_df, on=['업체명', '물품분류명']).sort_values('매출총합계', ascending=False)
+    # 누락된 월이 있어도 에러 안 나도록 빈 기둥 세우기
+    for m in ['1월', '2월', '3월', '4월']:
+        if m not in pivot_df.columns:
+            pivot_df[m] = 0
+            
+    # 💡 1분기 합계 및 누적 합계 칼럼 부활
+    pivot_df['1분기 합계'] = pivot_df['1월'] + pivot_df['2월'] + pivot_df['3월']
+    pivot_df['누적 합계'] = pivot_df['1분기 합계'] + pivot_df['4월']
     
-    # 숫자 포맷팅해서 예쁘게 보여주기
-    styled_table = final_table.style.format({col: "{:,.0f}" for col in month_cols + ['매출총합계']})
-    st.dataframe(styled_table, use_container_width=True)
+    cnt_df = df_f.groupby('업체명')['납품요구번호'].nunique().reset_index().rename(columns={'납품요구번호':'총계약건수'})
+    final_table = pd.merge(pivot_df, cnt_df, on='업체명').sort_values('누적 합계', ascending=False)
+    
+    # 랭킹 No. 1번 칼럼 고정 및 깔끔한 칼럼 정렬
+    final_table.insert(0, '랭킹 No.', range(1, len(final_table) + 1))
+    cols_order = ['랭킹 No.', '업체명', '1월', '2월', '3월', '1분기 합계', '4월', '누적 합계', '총계약건수']
+    final_table = final_table[cols_order]
+    
+    styled_table = final_table.style.format({col: "{:,.0f}" for col in ['1월', '2월', '3월', '1분기 합계', '4월', '누적 합계']})
+    st.dataframe(styled_table, use_container_width=True, hide_index=True)
 
-    # 💾 5. 엑셀 다운로드 버튼 복구
+    # 💾 5. 엑셀 다운로드 버튼
     def to_excel(df):
         output = BytesIO()
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            df.to_excel(writer, index=False, sheet_name='실적분석')
-            # 엑셀 컬럼 너비 자동 조절
-            worksheet = writer.sheets['실적분석']
+            df.to_excel(writer, index=False, sheet_name='실적랭킹')
+            worksheet = writer.sheets['실적랭킹']
             for i, col in enumerate(df.columns):
                 column_len = max(df[col].astype(str).map(len).max(), len(col)) + 2
                 worksheet.set_column(i, i, column_len)
@@ -248,7 +272,7 @@ else:
     st.download_button(
         label="💾 엑셀(.xlsx) 보고서 다운로드",
         data=to_excel(final_table),
-        file_name=f'조달실적_통합분석_{datetime.now().strftime("%Y%m%d")}.xlsx',
+        file_name=f'조달실적_업체별랭킹_{datetime.now().strftime("%Y%m%d")}.xlsx',
         mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
     )
 
