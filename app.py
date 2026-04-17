@@ -113,10 +113,10 @@ df_hist = load_historical_data()
 df_api, api_msg = update_realtime_data()
 df_total = pd.concat([df_hist, df_api], ignore_index=True) if not df_api.empty else df_hist.copy()
 
-st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v8.5</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v8.6</div>", unsafe_allow_html=True)
 st.markdown(f"<div class='update-time'>🕒 마지막 업데이트: {st.session_state.last_update} | 상태: {api_msg}</div>", unsafe_allow_html=True)
 
-# --- 6. 사이드바 필터 (쓸데없는 버튼 제거, 심플하게 유지!) ---
+# --- 6. 사이드바 필터 ---
 with st.sidebar:
     st.markdown("### 🔍 품목 필터")
     all_items = sorted(df_total['물품분류명'].dropna().astype(str).unique()) if not df_total.empty else []
@@ -153,7 +153,7 @@ else:
     fig_combo.add_trace(go.Scatter(x=monthly_df['월'], y=monthly_df['건수'], name='계약건수(건)', mode='lines+markers+text', text=monthly_df['건수'], textposition='top center', marker_color='#ef4444', yaxis='y2'))
     fig_combo.update_layout(yaxis=dict(title='매출액(원)', showgrid=False), yaxis2=dict(title='계약건수(건)', overlaying='y', side='right', showgrid=False), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1), margin=dict(l=0, r=0, t=30, b=0))
     
-    # 🏆 도넛 차트 (항상 매출액 기준으로 고정!)
+    # 🏆 도넛 차트
     col_a, col_b = st.columns(2)
     with col_a:
         st.subheader("📈 월별 실적 추이")
@@ -169,57 +169,72 @@ else:
 
     st.markdown("---")
 
-    # 📋 4. 업체별 피벗 테이블 (건수 체크박스 도입!)
+    # 📋 4. 업체별 피벗 테이블 (월별/분기별 건수 교차 표시 완벽 구현!)
     st.subheader("📋 업체별 종합 실적 랭킹 보드")
     
     # 💡 [핵심] 테이블 바로 위에 체크박스 생성
-    show_count = st.checkbox("📝 표에 총 계약건수 함께 보기", value=False)
+    show_count = st.checkbox("📝 표에 월별/분기별 계약건수 함께 보기", value=False)
     
-    # 1. 매출액 피벗 테이블 생성
-    pivot_df = pd.pivot_table(df_f, values='금액', index='업체명', columns='월', aggfunc='sum', fill_value=0).reset_index()
+    # 1. 매출액 피벗 (기준)
+    pivot_amt = pd.pivot_table(df_f, values='금액', index='업체명', columns='월', aggfunc='sum', fill_value=0).reset_index()
     for m in ['1월', '2월', '3월', '4월']:
-        if m not in pivot_df.columns: pivot_df[m] = 0
-            
-    pivot_df['1분기 합계'] = pivot_df['1월'] + pivot_df['2월'] + pivot_df['3월']
-    pivot_df['누적 합계'] = pivot_df['1분기 합계'] + pivot_df['4월']
+        if m not in pivot_amt.columns: pivot_amt[m] = 0
+    pivot_amt['1분기 합계'] = pivot_amt['1월'] + pivot_amt['2월'] + pivot_amt['3월']
+    pivot_amt['누적 합계'] = pivot_amt['1분기 합계'] + pivot_amt['4월']
     
-    # 2. 계약 건수 테이블 생성
-    cnt_df = df_f.groupby('업체명')['납품요구번호'].nunique().reset_index().rename(columns={'납품요구번호':'총계약건수'})
+    # 2. 계약 건수 피벗
+    pivot_cnt = pd.pivot_table(df_f, values='납품요구번호', index='업체명', columns='월', aggfunc='nunique', fill_value=0).reset_index()
+    for m in ['1월', '2월', '3월', '4월']:
+        if m not in pivot_cnt.columns: pivot_cnt[m] = 0
+    pivot_cnt['1분기(건수)'] = pivot_cnt['1월'] + pivot_cnt['2월'] + pivot_cnt['3월']
+    pivot_cnt['누적(건수)'] = pivot_cnt['1분기(건수)'] + pivot_cnt['4월']
     
-    # 3. 데이터 병합 (랭킹은 무조건 누적 매출액 기준!)
-    final_table = pd.merge(pivot_df, cnt_df, on='업체명').sort_values('누적 합계', ascending=False).reset_index(drop=True)
+    # 건수 컬럼명 변경 (교차 표시를 위해)
+    pivot_cnt.rename(columns={'1월': '1월(건수)', '2월': '2월(건수)', '3월': '3월(건수)', '4월': '4월(건수)'}, inplace=True)
+    
+    # 3. 데이터 병합
+    final_table = pd.merge(pivot_amt, pivot_cnt, on='업체명', how='outer').fillna(0)
+    final_table = final_table.sort_values('누적 합계', ascending=False).reset_index(drop=True)
     final_table.insert(0, '랭킹 No.', range(1, len(final_table) + 1))
     
-    # 4. 체크박스 상태에 따라 표에 보여줄 칼럼 결정
-    base_cols = ['랭킹 No.', '업체명', '1월', '2월', '3월', '1분기 합계', '4월', '누적 합계']
+    # 4. 체크박스 상태에 따라 표시할 칼럼 '교차' 배치
     if show_count:
-        display_cols = base_cols + ['총계약건수']
+        display_cols = [
+            '랭킹 No.', '업체명', 
+            '1월', '1월(건수)', 
+            '2월', '2월(건수)', 
+            '3월', '3월(건수)', 
+            '1분기 합계', '1분기(건수)', 
+            '4월', '4월(건수)', 
+            '누적 합계', '누적(건수)'
+        ]
     else:
-        display_cols = base_cols
+        display_cols = ['랭킹 No.', '업체명', '1월', '2월', '3월', '1분기 합계', '4월', '누적 합계']
         
     final_table = final_table[display_cols]
     
-    # 5. 엑셀 조건부 서식 (아름다운 색상 적용)
+    # 5. 숫자 포맷팅
     format_dict = {col: "{:,.0f}" for col in ['1월', '2월', '3월', '1분기 합계', '4월', '누적 합계']}
-    if show_count: format_dict['총계약건수'] = "{:,}"
+    if show_count: 
+        format_dict.update({col: "{:,.0f}" for col in ['1월(건수)', '2월(건수)', '3월(건수)', '1분기(건수)', '4월(건수)', '누적(건수)']})
     
     styled_table = final_table.style.format(format_dict)
     
-    # 업체명 (회색) / 월별 (연파랑) / 1분기 (연주황)
+    # 6. 엑셀 조건부 서식 스타일 (건수는 연두색 계열로 칠해서 구별)
     styled_table = styled_table.set_properties(subset=['업체명'], **{'background-color': 'rgba(128, 128, 128, 0.1)', 'font-weight': 'bold'})
     styled_table = styled_table.set_properties(subset=['1월', '2월', '3월', '4월'], **{'background-color': 'rgba(54, 162, 235, 0.05)'})
     styled_table = styled_table.set_properties(subset=['1분기 합계'], **{'background-color': 'rgba(255, 159, 64, 0.1)', 'font-weight': 'bold'})
     
-    # 체크박스를 켰을 때 나오는 '총계약건수'는 연두색으로 분리해서 표시
     if show_count:
-        styled_table = styled_table.set_properties(subset=['총계약건수'], **{'background-color': 'rgba(76, 175, 80, 0.1)', 'font-weight': 'bold'})
+        # 건수 데이터는 옅은 녹색, 분기/누적 건수는 살짝 진한 녹색
+        styled_table = styled_table.set_properties(subset=['1월(건수)', '2월(건수)', '3월(건수)', '4월(건수)'], **{'background-color': 'rgba(76, 175, 80, 0.05)'})
+        styled_table = styled_table.set_properties(subset=['1분기(건수)', '누적(건수)'], **{'background-color': 'rgba(76, 175, 80, 0.15)', 'font-weight': 'bold'})
     
-    # 누적 합계는 '랭킹'을 상징하므로 강렬한 그라데이션 고정!
     styled_table = styled_table.background_gradient(subset=['누적 합계'], cmap='Blues')
     
     st.dataframe(styled_table, use_container_width=True, hide_index=True)
 
-    # 💾 5. 엑셀 다운로드
+    # 💾 5. 엑셀 다운로드 (체크박스 켠 상태로 다운받으면 건수도 엑셀에 포함됨!)
     def to_excel(df):
         output = BytesIO()
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
