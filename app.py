@@ -33,7 +33,7 @@ TARGET_COMPANIES = [
     "비티에스 주식회사", "주식회사 인텔리빅스", "주식회사 비알인포텍"
 ]
 
-# --- 3. [즉시 로드] 로컬 데이터 로직 (어제 성공했던 무적 로직 부활!) ---
+# --- 3. [즉시 로드] 로컬 데이터 로직 (납품증감금액 단독 합산 로직 적용!) ---
 @st.cache_data(ttl=3600)
 def load_historical_data():
     files = ['data.csv', 'data02.csv', 'data02.cvs', 'data03.csv', 'data04.csv']
@@ -41,7 +41,6 @@ def load_historical_data():
     
     for idx, file in enumerate(files):
         try:
-            # 어제 우리가 알아냈던 진짜 구조: UTF-16 인코딩에 탭(\t) 구분자!
             df = None
             try_configs = [
                 {'encoding': 'utf-16', 'sep': '\t'},
@@ -52,23 +51,41 @@ def load_historical_data():
             for config in try_configs:
                 try:
                     temp_df = pd.read_csv(file, encoding=config['encoding'], sep=config['sep'], on_bad_lines='skip', low_memory=False)
-                    if len(temp_df.columns) > 2: # 컬럼이 정상적으로 쪼개졌는지 확인
+                    if len(temp_df.columns) > 2:
                         df = temp_df
                         break
-                except:
-                    pass
+                except: pass
             
-            if df is None:
-                continue
+            if df is None: continue
 
             df.rename(columns=lambda x: str(x).strip(), inplace=True)
-            amt_col = '납품요구금액' if '납품요구금액' in df.columns else ('금액' if '금액' in df.columns else None)
             
-            if amt_col is None:
+            if '계약업체명' in df.columns and '업체명' not in df.columns: df.rename(columns={'계약업체명': '업체명'}, inplace=True)
+            if '품명' in df.columns and '물품분류명' not in df.columns: df.rename(columns={'품명': '물품분류명'}, inplace=True)
+            
+            # 납품요구번호 컬럼 확보
+            req_col = '납품요구번호' if '납품요구번호' in df.columns else ('주문번호' if '주문번호' in df.columns else None)
+            if not req_col: continue 
+
+            # 💡 [핵심] 금액 로직 최종 수정: 오직 '납품증감금액' (또는 합계납품증감금액) 만 100% 사용!
+            if '납품증감금액' in df.columns:
+                df['금액'] = pd.to_numeric(df['납품증감금액'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+            elif '합계납품증감금액' in df.columns:
+                df['금액'] = pd.to_numeric(df['합계납품증감금액'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+            elif '납품요구금액' in df.columns: # 구버전 파일이나 API 백업용
+                df['금액'] = pd.to_numeric(df['납품요구금액'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+            elif '납품금액' in df.columns: 
+                df['금액'] = pd.to_numeric(df['납품금액'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+            elif '금액' in df.columns:
+                df['금액'] = pd.to_numeric(df['금액'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+            else:
                 continue
                 
-            temp_df = df[['업체명', '물품분류명', amt_col]].copy()
-            temp_df.columns = ['업체명', '물품분류명', '금액']
+            if '업체명' not in df.columns or '물품분류명' not in df.columns:
+                continue
+
+            temp_df = df[['업체명', '물품분류명', '금액', req_col]].copy()
+            temp_df.columns = ['업체명', '물품분류명', '금액', '납품요구번호']
             temp_df['월'] = f"{idx+1}월"
             temp_df['업체명'] = temp_df['업체명'].astype(str).str.strip()
             
@@ -104,8 +121,13 @@ def update_realtime_data():
             for item in items:
                 corp = item.findtext('corpNm', '').strip()
                 if corp in TARGET_COMPANIES:
-                    new_data.append({'업체명': corp, '물품분류명': item.findtext('prdctClsfcNm', ''),
-                                     '금액': float(item.findtext('dlvrReqAmt', 0)), '월': '4월(실시간)'})
+                    new_data.append({
+                        '업체명': corp, 
+                        '물품분류명': item.findtext('prdctClsfcNm', ''),
+                        '금액': float(item.findtext('dlvrReqAmt', 0)), 
+                        '납품요구번호': item.findtext('dlvrReqNo', f'API_{now.timestamp()}'),
+                        '월': '4월(실시간)'
+                    })
             
             if new_data:
                 st.session_state.api_df = pd.DataFrame(new_data)
@@ -128,7 +150,7 @@ if not df_api.empty:
 else:
     df_total = df_hist.copy()
 
-st.markdown(f"<div class='main-title'>🏆 통합 조달 전략 분석 v7.6</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='main-title'>🏆 통합 조달 전략 분석 v7.9</div>", unsafe_allow_html=True)
 st.markdown(f"<div class='update-time'>🕒 마지막 업데이트: {st.session_state.last_update} | 상태: {api_msg}</div>", unsafe_allow_html=True)
 
 # --- 6. 사이드바 필터 ---
@@ -136,7 +158,7 @@ with st.sidebar:
     st.header("🔍 분석 필터")
     
     if df_total.empty:
-        st.error("⚠️ 데이터를 찾을 수 없습니다. (data.csv 등 파일 확인 필요)")
+        st.error("⚠️ 데이터를 찾을 수 없습니다.")
         all_items = []
     else:
         all_items = sorted(df_total['물품분류명'].dropna().astype(str).unique())
@@ -159,7 +181,7 @@ with st.sidebar:
 
 # --- 7. 메인 차트 및 데이터 화면 ---
 if df_total.empty:
-    st.warning("🚨 현재 분석할 데이터가 없습니다. 폴더(또는 GitHub)에 'data.csv', 'data02.csv(또는 cvs)', 'data03.csv', 'data04.csv' 파일이 모두 업로드되어 있는지 확인해주세요.")
+    st.warning("🚨 데이터베이스에서 실적을 불러오는 중이거나 파일이 없습니다.")
 
 elif not selected:
     st.info("👈 왼쪽 필터에서 분석할 품목을 1개 이상 선택해주세요.")
@@ -167,9 +189,13 @@ elif not selected:
 else:
     df_f = df_total[df_total['물품분류명'].isin(selected)]
     
+    # 💡 납품요구번호별 1건 카운트 & 증감금액 단순 총합
+    total_cnt = df_f['납품요구번호'].nunique()
+    total_amt = df_f['금액'].sum()
+    
     c1, c2 = st.columns(2)
-    c1.metric("💰 누적 매출액", f"{df_f['금액'].sum():,.0f}원")
-    c2.metric("📝 총 계약 건수", f"{len(df_f):,}건")
+    c1.metric("💰 누적 매출액 (납품증감금액 합계)", f"{total_amt:,.0f}원")
+    c2.metric("📝 총 계약 건수 (납품요구번호 기준)", f"{total_cnt:,}건")
 
     st.markdown("---")
 
@@ -189,7 +215,12 @@ else:
 
     st.markdown("---")
 
-    st.subheader("📋 상세 분석 데이터")
-    st.dataframe(df_f.sort_values('금액', ascending=False), use_container_width=True)
+    st.subheader("📋 상세 분석 데이터 (업체/품목별)")
+    view_df = df_f.groupby(['업체명', '물품분류명', '월']).agg(
+        금액=('금액', 'sum'), 
+        건수=('납품요구번호', 'nunique')
+    ).reset_index().sort_values('금액', ascending=False)
+    
+    st.dataframe(view_df, use_container_width=True)
 
 st.markdown("<br><center style='color:gray;'>Copyright(C) 2026 Joey Kim. Data from Public Data Portal.</center>", unsafe_allow_html=True)
