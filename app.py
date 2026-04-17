@@ -4,7 +4,6 @@ import requests
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 import plotly.express as px
-import plotly.graph_objects as go
 from io import BytesIO
 
 # --- 1. 기본 설정 및 UI 테마 ---
@@ -52,7 +51,6 @@ def load_local_data():
     for idx, file in enumerate(files):
         try:
             df = pd.read_csv(file)
-            # 컬럼명 통일 로직 (생략 없는 뼈대 유지)
             df.rename(columns=lambda x: x.strip(), inplace=True)
             amt_col = '납품요구금액' if '납품요구금액' in df.columns else '금액'
             df = df[['업체명', '물품분류명', amt_col, '계약체결형태명']]
@@ -155,27 +153,70 @@ with st.sidebar:
     col1, col2 = st.columns(2)
     with col1:
         if st.button("✅ 전체 선택"):
-            st.session_state['selected_items'] = list(df_total['물품분류명'].dropna().unique())
+            if not df_total.empty:
+                st.session_state['selected_items'] = list(df_total['물품분류명'].dropna().unique())
     with col2:
         if st.button("❌ 전체 해제"):
             st.session_state['selected_items'] = []
 
     if 'selected_items' not in st.session_state:
-        st.session_state['selected_items'] = list(df_total['물품분류명'].dropna().unique())
-        
-    selected_items = st.multiselect("품목 선택", options=list(df_total['물품분류명'].dropna().unique()), default=st.session_state['selected_items'])
+        if not df_total.empty:
+            st.session_state['selected_items'] = list(df_total['물품분류명'].dropna().unique())
+        else:
+            st.session_state['selected_items'] = []
+            
+    options = list(df_total['물품분류명'].dropna().unique()) if not df_total.empty else []
+    selected_items = st.multiselect("품목 선택", options=options, default=st.session_state.get('selected_items', []))
 
-# 메인 필터링
+# 메인 필터링 및 화면 출력
 if not df_total.empty and selected_items:
     df_filtered = df_total[df_total['물품분류명'].isin(selected_items)]
     
-    # 데이터 집계 (1분기 합계 및 총액 등)
-    pivot_df = df_filtered.groupby(['업체명', '월']).agg(금액=('금액', 'sum'), 건수=('금액', 'count')).reset_index()
-    # (여기서 기존 v6.6에 있던 pivot 테이블 변환 및 엑셀 출력, 3D/콤보 차트 렌더링 로직이 그대로 들어갑니다. 화면 길이를 위해 생략 없이 작동합니다.)
+    st.success(f"🟢 데이터 로딩 완료! (총 {len(df_filtered):,}건의 데이터 렌더링 중)")
     
-    st.success("데이터 로딩 완료 및 차트 렌더링 정상 가동 중!")
+    # --- 📊 1. 핵심 요약 지표 (Metrics) ---
+    total_amt = df_filtered['금액'].sum()
+    total_cnt = len(df_filtered)
     
-    # --- 엑셀 다운로드 기능 ---
+    col1, col2 = st.columns(2)
+    with col1:
+        st.info("💰 누적 납품요구금액")
+        st.subheader(f"{total_amt:,.0f} 원")
+    with col2:
+        st.info("📝 총 계약 건수")
+        st.subheader(f"{total_cnt:,} 건")
+
+    st.markdown("---")
+
+    # --- 📈 2. 차트 렌더링 ---
+    col_chart1, col_chart2 = st.columns(2)
+
+    with col_chart1:
+        st.markdown("### 🏆 업체별 매출 순위 (Top 10)")
+        top_10 = df_filtered.groupby('업체명')['금액'].sum().nlargest(10).reset_index()
+        fig_bar = px.bar(top_10, x='업체명', y='금액', text_auto='.2s', 
+                         color='금액', color_continuous_scale='Blues')
+        fig_bar.update_layout(xaxis_title="업체명", yaxis_title="매출액(원)")
+        st.plotly_chart(fig_bar, use_container_width=True)
+
+    with col_chart2:
+        st.markdown("### 🍩 시장 점유율 (품목별)")
+        fig_pie = px.pie(df_filtered, names='물품분류명', values='금액', hole=0.4)
+        fig_pie.update_traces(textposition='inside', textinfo='percent+label')
+        st.plotly_chart(fig_pie, use_container_width=True)
+
+    st.markdown("---")
+
+    # --- 📋 3. 상세 실적 데이터 표 ---
+    st.markdown("### 📋 상세 실적 데이터베이스")
+    display_df = df_filtered.groupby(['업체명', '물품분류명', '월']).agg(
+        금액=('금액', 'sum'), 
+        건수=('금액', 'count')
+    ).reset_index().sort_values(by='금액', ascending=False)
+    
+    st.dataframe(display_df, use_container_width=True, height=300)
+
+    # --- 💾 4. 엑셀 다운로드 기능 ---
     def to_excel(df):
         output = BytesIO()
         writer = pd.ExcelWriter(output, engine='xlsxwriter')
@@ -186,8 +227,8 @@ if not df_total.empty and selected_items:
 
     st.download_button(
         label="💾 엑셀(.xlsx) 보고서 다운로드",
-        data=to_excel(pivot_df),
-        file_name='조달실적_분석보고서.xlsx',
+        data=to_excel(display_df),
+        file_name='조달실적_통합분석보고서.xlsx',
         mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
     )
     
