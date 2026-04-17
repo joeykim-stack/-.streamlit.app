@@ -33,39 +33,41 @@ TARGET_COMPANIES = [
     "비티에스 주식회사", "주식회사 인텔리빅스", "주식회사 비알인포텍"
 ]
 
-# --- 3. [즉시 로드] 로컬 데이터 로직 (파일명 수정 완료!) ---
+# --- 3. [즉시 로드] 로컬 데이터 로직 (인코딩/파일명 완벽 대응) ---
 @st.cache_data(ttl=3600)
 def load_historical_data():
-    # 중찬이가 저장한 정확한 파일명으로 수정! (1월은 data_mini.csv 또는 data01.csv 일 수 있으니 에러 안나게 처리)
-    files = ['data_mini.csv', 'data02.csv', 'data03.csv', 'data04.csv']
+    # 네가 알려준 정확한 파일명 배열 (cvs 오타도 함께 찾도록 등록)
+    files = ['data.csv', 'data02.csv', 'data02.cvs', 'data03.csv', 'data04.csv']
     dfs = []
     
     for idx, file in enumerate(files):
         try:
-            df = pd.read_csv(file)
-            df.rename(columns=lambda x: x.strip(), inplace=True)
-            amt_col = '납품요구금액' if '납품요구금액' in df.columns else '금액'
+            # 💡 핵심 수정: UTF-8로 시도 후 에러나면 CP949(한국 엑셀 기본)로 강제 해독
+            try:
+                df = pd.read_csv(file, encoding='utf-8')
+            except UnicodeDecodeError:
+                df = pd.read_csv(file, encoding='cp949')
+                
+            df.rename(columns=lambda x: str(x).strip(), inplace=True)
+            
+            # 컬럼명 유연하게 대처
+            amt_col = '납품요구금액' if '납품요구금액' in df.columns else ('금액' if '금액' in df.columns else None)
+            
+            if amt_col is None:
+                continue # 금액 컬럼 없으면 패스
+                
             temp_df = df[['업체명', '물품분류명', amt_col]].copy()
             temp_df.columns = ['업체명', '물품분류명', '금액']
             temp_df['월'] = f"{idx+1}월"
             temp_df['업체명'] = temp_df['업체명'].astype(str).str.strip()
+            
             dfs.append(temp_df[temp_df['업체명'].isin(TARGET_COMPANIES)])
+            
         except FileNotFoundError:
-            # 혹시 1월 파일 이름이 data01.csv 라면 그것도 시도
-            if file == 'data_mini.csv':
-                try:
-                    df = pd.read_csv('data01.csv')
-                    df.rename(columns=lambda x: x.strip(), inplace=True)
-                    amt_col = '납품요구금액' if '납품요구금액' in df.columns else '금액'
-                    temp_df = df[['업체명', '물품분류명', amt_col]].copy()
-                    temp_df.columns = ['업체명', '물품분류명', '금액']
-                    temp_df['월'] = "1월"
-                    temp_df['업체명'] = temp_df['업체명'].astype(str).str.strip()
-                    dfs.append(temp_df[temp_df['업체명'].isin(TARGET_COMPANIES)])
-                except: pass
+            continue # 없는 파일명(예: data02.csv가 없고 cvs만 있을 때)은 에러 없이 패스
+        except Exception: 
             continue
-        except Exception: continue
-        
+            
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
 # --- 4. [백그라운드] 실시간 API 업데이트 로직 ---
@@ -117,15 +119,15 @@ if not df_api.empty:
 else:
     df_total = df_hist.copy()
 
-st.markdown(f"<div class='main-title'>🏆 통합 조달 전략 분석 v7.4</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='main-title'>🏆 통합 조달 전략 분석 v7.5</div>", unsafe_allow_html=True)
 st.markdown(f"<div class='update-time'>🕒 마지막 업데이트: {st.session_state.last_update} | 상태: {api_msg}</div>", unsafe_allow_html=True)
 
-# --- 6. 사이드바 필터 (초강력 방어 로직) ---
+# --- 6. 사이드바 필터 ---
 with st.sidebar:
     st.header("🔍 분석 필터")
     
     if df_total.empty:
-        st.error("⚠️ 데이터를 찾을 수 없습니다. 파일명을 확인해주세요.")
+        st.error("⚠️ 데이터를 찾을 수 없습니다. (data.csv 등 파일 확인 필요)")
         all_items = []
     else:
         all_items = sorted(df_total['물품분류명'].dropna().astype(str).unique())
@@ -148,7 +150,7 @@ with st.sidebar:
 
 # --- 7. 메인 차트 및 데이터 화면 ---
 if df_total.empty:
-    st.warning("🚨 현재 분석할 데이터가 없습니다. 폴더에 'data_mini.csv', 'data02.csv', 'data03.csv', 'data04.csv' 파일이 모두 있는지 확인해주세요.")
+    st.warning("🚨 현재 분석할 데이터가 없습니다. 폴더(또는 GitHub)에 'data.csv', 'data02.csv(또는 cvs)', 'data03.csv', 'data04.csv' 파일이 모두 업로드되어 있는지 확인해주세요.")
 
 elif not selected:
     st.info("👈 왼쪽 필터에서 분석할 품목을 1개 이상 선택해주세요.")
