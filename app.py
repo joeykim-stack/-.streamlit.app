@@ -72,6 +72,13 @@ def load_historical_data():
             temp_df.columns = ['업체명', '물품분류명', '금액', '납품요구번호']
             temp_df['월'] = target_month
             temp_df['업체명'] = temp_df['업체명'].astype(str).str.strip()
+            
+            # 💡 MAS여부 컬럼 추출 로직 추가
+            if 'MAS여부' in df.columns:
+                temp_df['MAS여부'] = df['MAS여부'].fillna('N').astype(str).str.strip().str.upper()
+            else:
+                temp_df['MAS여부'] = 'Y' # 파일에 칼럼이 없으면 기본적으로 Y(MAS)로 간주
+                
             dfs.append(temp_df[temp_df['업체명'].isin(TARGET_COMPANIES)])
         except Exception: continue
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
@@ -106,9 +113,13 @@ def update_realtime_data():
                     corp = item.findtext('corpNm', '').strip()
                     if corp in TARGET_COMPANIES:
                         all_new_data.append({
-                            '업체명': corp, '물품분류명': item.findtext('prdctClsfcNm', ''), 
+                            '업체명': corp, 
+                            '물품분류명': item.findtext('prdctClsfcNm', ''), 
                             '금액': float(item.findtext('dlvrReqAmt', 0)), 
-                            '납품요구번호': item.findtext('dlvrReqNo', f'API_{now.timestamp()}'), '월': '4월'
+                            '납품요구번호': item.findtext('dlvrReqNo', f'API_{now.timestamp()}'), 
+                            '월': '4월',
+                            # 💡 API 실시간 데이터에서도 MAS 여부 맵핑 (기본값 Y)
+                            'MAS여부': item.findtext('masYn', 'Y').strip().upper() 
                         })
                 total_count = int(root.findtext('.//totalCount', '0'))
                 if page_no * 999 >= total_count: break
@@ -129,7 +140,7 @@ df_hist = load_historical_data()
 df_api, api_msg = update_realtime_data()
 df_total = pd.concat([df_hist, df_api], ignore_index=True) if not df_api.empty else df_hist.copy()
 
-st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v9.2</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v9.3</div>", unsafe_allow_html=True)
 st.markdown(f"<div class='update-time'>🕒 마지막 업데이트(KST): {st.session_state.last_update} | 상태: {api_msg}</div>", unsafe_allow_html=True)
 
 # --- 6. 사이드바 ---
@@ -202,22 +213,30 @@ else:
 
     st.markdown("---")
 
-    # 📋 8. 업체별 종합 랭킹 보드 (💡 랭킹 동적 정렬 및 하이라이트 기능 완벽 구현!)
+    # 📋 8. 업체별 종합 랭킹 보드 (💡 MAS 필터 추가!)
     st.subheader("📋 업체별 종합 실적 랭킹 보드")
     
-    # UI 배치: 체크박스와 정렬 기준 드롭다운
-    ctrl_col1, ctrl_col2 = st.columns([1, 1])
+    # UI 배치: 기능 컨트롤 패널
+    ctrl_col1, ctrl_col2, ctrl_col3 = st.columns([1.2, 1.2, 1])
     with ctrl_col1:
-        show_cnt = st.checkbox("📝 표에 월별/분기별 계약건수 함께 보기", value=False)
+        show_cnt = st.checkbox("📝 월/분기별 계약건수 함께 보기", value=False)
+    with ctrl_col2:
+        # 💡 MAS 계약 필터 체크박스
+        include_mas = st.checkbox("🏢 MAS 계약 포함 (해제 시 '우수조달'만 표시)", value=True)
         
-    # 데이터 피벗 (금액 & 건수)
-    p_amt = pd.pivot_table(df_f, values='금액', index='업체명', columns='월', aggfunc='sum', fill_value=0).reset_index()
+    # 💡 필터 적용 로직: 체크 해제 시 'MAS여부 == N' 인 것만 남김
+    board_df = df_f.copy()
+    if not include_mas:
+        board_df = board_df[board_df['MAS여부'] == 'N']
+
+    # 피벗 테이블 생성 (필터링된 board_df 사용)
+    p_amt = pd.pivot_table(board_df, values='금액', index='업체명', columns='월', aggfunc='sum', fill_value=0).reset_index()
     for m in ['1월', '2월', '3월', '4월']:
         if m not in p_amt.columns: p_amt[m] = 0
     p_amt['1분기 합계'] = p_amt['1월'] + p_amt['2월'] + p_amt['3월']
     p_amt['누적 합계'] = p_amt['1분기 합계'] + p_amt['4월']
     
-    p_cnt = pd.pivot_table(df_f, values='납품요구번호', index='업체명', columns='월', aggfunc='nunique', fill_value=0).reset_index()
+    p_cnt = pd.pivot_table(board_df, values='납품요구번호', index='업체명', columns='월', aggfunc='nunique', fill_value=0).reset_index()
     for m in ['1월', '2월', '3월', '4월']:
         if m not in p_cnt.columns: p_cnt[m] = 0
     p_cnt['1분기(건)'] = p_cnt['1월'] + p_cnt['2월'] + p_cnt['3월']
@@ -232,36 +251,39 @@ else:
     else:
         disp_cols = ['업체명', '1월', '2월', '3월', '1분기 합계', '4월', '누적 합계']
         
-    final = final[disp_cols]
-
-    # 💡 백엔드 동적 랭킹 정렬기
-    with ctrl_col2:
-        sort_options = [c for c in disp_cols if c != '업체명']
-        default_idx = sort_options.index('누적 합계')
-        sort_target = st.selectbox("⬇️ 실적 랭킹 정렬 기준 (선택 시 랭킹 및 그라데이션 자동 변경)", options=sort_options, index=default_idx)
+    # 체크 해제 시 업체가 아예 사라지는 경우(전부 MAS인 경우) 방어
+    if final.empty:
+        st.warning("선택하신 조건에 해당하는 우수조달('N') 실적이 없습니다.")
+    else:
+        final = final[disp_cols]
     
-    # 💡 데이터 정렬 및 랭킹 No. 실시간 재부여
-    final = final.sort_values(sort_target, ascending=False).reset_index(drop=True)
-    final.insert(0, '랭킹 No.', range(1, len(final) + 1))
-    
-    # 스타일링
-    fmt_map = {c: "{:,.0f}" for c in final.columns if c not in ['랭킹 No.', '업체명']}
-    styled = final.style.format(fmt_map)
-    styled = styled.set_properties(subset=['업체명'], **{'background-color': 'rgba(128, 128, 128, 0.1)', 'font-weight': 'bold'})
-    styled = styled.set_properties(subset=[c for c in final.columns if '월' in c and '(' not in c], **{'background-color': 'rgba(54, 162, 235, 0.05)'})
-    styled = styled.set_properties(subset=['1분기 합계'], **{'background-color': 'rgba(255, 159, 64, 0.1)', 'font-weight': 'bold'})
-    if show_cnt:
-        styled = styled.set_properties(subset=[c for c in final.columns if '(건)' in c], **{'background-color': 'rgba(76, 175, 80, 0.05)'})
+        # 백엔드 동적 랭킹 정렬기
+        with ctrl_col3:
+            sort_options = [c for c in disp_cols if c != '업체명']
+            default_idx = sort_options.index('누적 합계')
+            sort_target = st.selectbox("⬇️ 랭킹 정렬 기준", options=sort_options, index=default_idx, label_visibility="collapsed")
         
-    # 💡 스마트 하이라이트: 사용자가 선택한 정렬 기준 칼럼에 파란색 그라데이션 적용!
-    styled = styled.background_gradient(subset=[sort_target], cmap='Blues')
-    
-    st.dataframe(styled, use_container_width=True, hide_index=True)
+        # 데이터 정렬 및 랭킹 No. 부여
+        final = final.sort_values(sort_target, ascending=False).reset_index(drop=True)
+        final.insert(0, '랭킹 No.', range(1, len(final) + 1))
+        
+        # 스타일링
+        fmt_map = {c: "{:,.0f}" for c in final.columns if c not in ['랭킹 No.', '업체명']}
+        styled = final.style.format(fmt_map)
+        styled = styled.set_properties(subset=['업체명'], **{'background-color': 'rgba(128, 128, 128, 0.1)', 'font-weight': 'bold'})
+        styled = styled.set_properties(subset=[c for c in final.columns if '월' in c and '(' not in c], **{'background-color': 'rgba(54, 162, 235, 0.05)'})
+        styled = styled.set_properties(subset=['1분기 합계'], **{'background-color': 'rgba(255, 159, 64, 0.1)', 'font-weight': 'bold'})
+        if show_cnt:
+            styled = styled.set_properties(subset=[c for c in final.columns if '(건)' in c], **{'background-color': 'rgba(76, 175, 80, 0.05)'})
+            
+        styled = styled.background_gradient(subset=[sort_target], cmap='Blues')
+        
+        st.dataframe(styled, use_container_width=True, hide_index=True)
 
-    # 💾 엑셀 다운로드
-    xlsx = BytesIO()
-    with pd.ExcelWriter(xlsx, engine='xlsxwriter') as wr:
-        final.to_excel(wr, index=False, sheet_name='실적랭킹')
-    st.download_button("💾 엑셀 보고서 다운로드", xlsx.getvalue(), f'조달업체랭킹_{get_now_kst().strftime("%Y%m%d")}.xlsx')
+        # 💾 엑셀 다운로드 (필터링된 상태 그대로 다운로드)
+        xlsx = BytesIO()
+        with pd.ExcelWriter(xlsx, engine='xlsxwriter') as wr:
+            final.to_excel(wr, index=False, sheet_name='실적랭킹')
+        st.download_button("💾 엑셀 보고서 다운로드", xlsx.getvalue(), f'조달업체랭킹_{get_now_kst().strftime("%Y%m%d")}.xlsx')
 
 st.markdown("<br><center style='color:gray;'>Copyright(C) 2026 Joey Kim. Data from Public Data Portal.</center>", unsafe_allow_html=True)
