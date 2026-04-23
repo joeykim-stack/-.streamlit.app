@@ -99,7 +99,6 @@ def update_realtime_data():
         page_no = 1
         
         while True:
-            # 💡 핵심 수정: 파일에 19일까지 있으므로, API는 4월 20일부터 긁어오도록 날짜 변경!
             params = {
                 'serviceKey': API_KEY, 'numOfRows': '999', 'pageNo': str(page_no),
                 'inqryDiv': '1', 'inqryBgnDate': '20260420', 'inqryEndDate': now.strftime('%Y%m%d')
@@ -128,18 +127,23 @@ def update_realtime_data():
         if all_new_data:
             st.session_state.api_df = pd.DataFrame(all_new_data)
             st.session_state.last_update = now.strftime('%H:%M:%S')
-            return st.session_state.api_df, f"🟢 실시간 4월 하순 전수조사 완료 ({page_no}P)"
+            return st.session_state.api_df, f"🟢 실시간 4월 하순 전수조 완료 ({page_no}P)"
         return pd.DataFrame(), "🔵 4월 20일 이후 추가 실적 없음"
     except:
         st.session_state.retry_time = now + timedelta(minutes=30)
         return pd.DataFrame(), "⚠️ 통신 장애 (30분 뒤 재시도)"
 
-# --- 5. 데이터 통합 실행 ---
+# --- 5. 데이터 통합 실행 및 💡 [핵심] 특정 품목 원천 차단 ---
 df_hist = load_historical_data()
 df_api, api_msg = update_realtime_data()
 df_total = pd.concat([df_hist, df_api], ignore_index=True) if not df_api.empty else df_hist.copy()
 
-st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v9.4</div>", unsafe_allow_html=True)
+# 💡 '무인교통감시장치' 데이터 영구 제외 로직 추가!
+if not df_total.empty and '물품분류명' in df_total.columns:
+    # '무인교통감시장치'라는 단어가 포함된 데이터는 통째로 삭제
+    df_total = df_total[~df_total['물품분류명'].astype(str).str.contains('무인교통감시장치', na=False)]
+
+st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v9.5</div>", unsafe_allow_html=True)
 st.markdown(f"<div class='update-time'>🕒 마지막 업데이트(KST): {st.session_state.last_update} | 상태: {api_msg}</div>", unsafe_allow_html=True)
 
 # --- 6. 사이드바 ---
