@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import plotly.express as px
 import plotly.graph_objects as go
 from io import BytesIO
+import urllib.parse
 
 # --- 1. 기본 설정 및 KST 시계 ---
 st.set_page_config(page_title="조달청 실적 분석 대시보드", layout="wide")
@@ -49,13 +50,14 @@ def load_historical_data():
     for file, target_month in file_month_map.items():
         try:
             df = None
-            for config in [{'encoding':'utf-16','sep':'\t'}, {'encoding':'cp949','sep':','}, {'encoding':'utf-8','sep':','}]:
+            for config in [{'encoding':'utf-16','sep':'\t'}, {'encoding':'cp949','sep':','}, {'encoding':'utf-8','sep':','}, {'encoding':'utf-8-sig','sep':','}]:
                 try:
                     temp_df = pd.read_csv(file, encoding=config['encoding'], sep=config['sep'], on_bad_lines='skip', low_memory=False)
                     if len(temp_df.columns) > 2:
                         df = temp_df; break
                 except: pass
             if df is None: continue
+            
             df.rename(columns=lambda x: str(x).strip(), inplace=True)
             if '계약업체명' in df.columns and '업체명' not in df.columns: df.rename(columns={'계약업체명': '업체명'}, inplace=True)
             if '품명' in df.columns and '물품분류명' not in df.columns: df.rename(columns={'품명': '물품분류명'}, inplace=True)
@@ -82,7 +84,7 @@ def load_historical_data():
         except Exception: continue
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
-# --- 4. [실시간 API] ---
+# --- 4. [실시간 API] 버그 완벽 픽스 엔진 ---
 def update_realtime_data():
     if 'api_df' not in st.session_state: st.session_state.api_df = pd.DataFrame()
     if 'last_update' not in st.session_state: st.session_state.last_update = "업데이트 전"
@@ -93,22 +95,42 @@ def update_realtime_data():
         return st.session_state.api_df, f"⏳ 대기 중 (다음 시도 KST: {st.session_state.retry_time.strftime('%H:%M:%S')})"
     
     try:
-        API_KEY = "c1b379f7734c7d624ddefea07510eae71b6e12c5fb89970319d76c5ae8db5248"
-        URL = "http://apis.data.go.kr/1230000/at/ShoppingMallPrdctInfoService/getDlvrReqInfoList"
+        # 💡 [버그픽스 1] 파이썬 requests 이중 인코딩 방지 처리
+        RAW_KEY = "c1b379f7734c7d624ddefea07510eae71b6e12c5fb89970319d76c5ae8db5248"
+        API_KEY = urllib.parse.unquote(RAW_KEY)
+        
+        # 💡 [버그픽스 2] V5 API 정확한 엔드포인트 복구 (이상한 /at/ 경로 삭제)
+        URL = "http://apis.data.go.kr/1230000/ShoppingMallPrdctInfoService05/getDlvrReqInfoList"
         all_new_data = []
         page_no = 1
         
         while True:
+            # 💡 [버그픽스 3] numOfRows를 999에서 100으로 롤백하여 서버 500 에러 방어
             params = {
-                'serviceKey': API_KEY, 'numOfRows': '999', 'pageNo': str(page_no),
-                'inqryDiv': '1', 'inqryBgnDate': '20260420', 'inqryEndDate': now.strftime('%Y%m%d')
+                'serviceKey': API_KEY, 
+                'numOfRows': '100', 
+                'pageNo': str(page_no),
+                'inqryDiv': '1', 
+                'inqryBgnDate': '20260420', 
+                'inqryEndDate': now.strftime('%Y%m%d')
             }
-            res = requests.get(URL, params=params, timeout=15)
+            
+            # 파라미터 수동 조립 (조달청 서버 호환성 극대화)
+            query_string = "&".join([f"{k}={v}" for k, v in params.items()])
+            full_url = f"{URL}?{query_string}"
+            
+            res = requests.get(full_url, timeout=15)
             if res.status_code == 200:
                 root = ET.fromstring(res.content)
                 items = root.findall('.//item')
                 if not items: break
+                
                 for item in items:
+                    # 💡 [버그픽스 4] '제3자단가' 계약만 쏙쏙 골라내기 (핵심 누락 복구!)
+                    cntrct_stle = item.findtext('cntrctCnclsStleNm', '')
+                    if '제3자단가' not in cntrct_stle:
+                        continue
+                        
                     corp = item.findtext('corpNm', '').strip()
                     if corp in TARGET_COMPANIES:
                         all_new_data.append({
@@ -119,34 +141,36 @@ def update_realtime_data():
                             '월': '4월',
                             'MAS여부': item.findtext('masYn', 'Y').strip().upper() 
                         })
+                
                 total_count = int(root.findtext('.//totalCount', '0'))
-                if page_no * 999 >= total_count: break
+                if page_no * 100 >= total_count: break
                 page_no += 1
-            else: break
+            else: 
+                break
 
         if all_new_data:
             st.session_state.api_df = pd.DataFrame(all_new_data)
             st.session_state.last_update = now.strftime('%H:%M:%S')
-            return st.session_state.api_df, f"🟢 실시간 4월 하순 전수조 완료 ({page_no}P)"
-        return pd.DataFrame(), "🔵 4월 20일 이후 추가 실적 없음"
-    except:
+            return st.session_state.api_df, f"🟢 4/20 이후 실시간 수집 완료 ({page_no}P)"
+        
+        st.session_state.last_update = now.strftime('%H:%M:%S')
+        return st.session_state.api_df, "🔵 4/20 이후 추가 실적 없음"
+    except Exception as e:
         st.session_state.retry_time = now + timedelta(minutes=30)
-        return pd.DataFrame(), "⚠️ 통신 장애 (30분 뒤 재시도)"
+        return st.session_state.api_df, "⚠️ 통신 장애 (30분 뒤 재시도)"
 
-# --- 5. 데이터 통합 실행 및 💡 [핵심] 특정 품목 원천 차단 ---
+# --- 5. 데이터 통합 실행 및 무인교통감시장치 영구 차단 ---
 df_hist = load_historical_data()
 df_api, api_msg = update_realtime_data()
 df_total = pd.concat([df_hist, df_api], ignore_index=True) if not df_api.empty else df_hist.copy()
 
-# 💡 '무인교통감시장치' 데이터 영구 제외 로직 추가!
 if not df_total.empty and '물품분류명' in df_total.columns:
-    # '무인교통감시장치'라는 단어가 포함된 데이터는 통째로 삭제
     df_total = df_total[~df_total['물품분류명'].astype(str).str.contains('무인교통감시장치', na=False)]
 
-st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v9.5</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v9.6</div>", unsafe_allow_html=True)
 st.markdown(f"<div class='update-time'>🕒 마지막 업데이트(KST): {st.session_state.last_update} | 상태: {api_msg}</div>", unsafe_allow_html=True)
 
-# --- 6. 사이드바 ---
+# --- 6. 사이드바 필터 ---
 with st.sidebar:
     st.header("🔍 품목 상세 필터")
     if df_total.empty:
@@ -250,7 +274,7 @@ else:
         disp_cols = ['업체명', '1월', '2월', '3월', '1분기 합계', '4월', '누적 합계']
         
     if final.empty:
-        st.warning("선택하신 조건에 해당하는 우수조달('N') 실적이 없습니다.")
+        st.warning("선택하신 조건에 해당하는 실적이 없습니다.")
     else:
         final = final[disp_cols]
     
