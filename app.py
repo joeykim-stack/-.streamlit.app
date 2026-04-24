@@ -38,7 +38,7 @@ TARGET_COMPANIES = [
     "비티에스 주식회사", "주식회사 인텔리빅스", "주식회사 비알인포텍"
 ]
 
-# 💡 스마트 이름 정규화 함수 ((주)세오 -> 세오 찰떡 매칭)
+# 💡 스마트 이름 정규화 함수
 def normalize_corp_name(name):
     if not name: return ""
     return name.replace('주식회사', '').replace('(주)', '').replace(' ', '').strip()
@@ -92,7 +92,7 @@ def load_historical_data():
         except Exception: continue
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
-# --- 4. [실시간 API] 황금 주소 완벽 롤백 엔진 ---
+# --- 4. [실시간 API] V5 찐 최종 병기 엔진 ---
 def update_realtime_data():
     if 'api_df' not in st.session_state: st.session_state.api_df = pd.DataFrame()
     if 'last_update' not in st.session_state: st.session_state.last_update = "업데이트 전"
@@ -104,41 +104,40 @@ def update_realtime_data():
     
     try:
         API_KEY = "c1b379f7734c7d624ddefea07510eae71b6e12c5fb89970319d76c5ae8db5248"
-        # 💡 [핵심 해결] 파로스 8.7억을 찾아냈던 전설의 황금 주소('/at/')로 100% 롤백! 빈 껍데기 V5 주소 폐기!
-        URL = "http://apis.data.go.kr/1230000/at/ShoppingMallPrdctInfoService/getDlvrReqInfoList"
+        # 💡 [핵심 1] V5 최신 살아있는 서버 사용
+        URL = "http://apis.data.go.kr/1230000/ShoppingMallPrdctInfoService05/getDlvrReqInfoList"
         
         all_new_data = []
         page_no = 1
         raw_scanned_count = 0
         total_count = 0
         
-        # 현재 연도에 맞춰서 4월 20일 자동 세팅
         bgn_date = now.strftime('%Y') + '0420'
         end_date = now.strftime('%Y%m%d')
         
         while True:
-            # 잔재주 부리지 않고 가장 순수하고 완벽했던 파라미터 조합으로 전송
+            # 💡 [핵심 2] V5 서버의 비밀 병기 파라미터 (Dt) 장착! 구형(Date)도 보험으로 같이 전송
             params = {
                 'serviceKey': API_KEY, 
-                'numOfRows': '999', 
+                'numOfRows': '100', 
                 'pageNo': str(page_no),
                 'inqryDiv': '1', 
-                'inqryBgnDate': bgn_date, 
-                'inqryEndDate': end_date
+                'inqryBgnDt': bgn_date,   # V5 신형 파라미터
+                'inqryEndDt': end_date,   # V5 신형 파라미터
+                'inqryBgnDate': bgn_date, # 구형 파라미터 (보험)
+                'inqryEndDate': end_date  # 구형 파라미터 (보험)
             }
             
-            # URL 수동 조립 버리고 requests의 강력한 기본 인코딩 사용
             res = requests.get(URL, params=params, timeout=15)
             
             if res.status_code == 200:
                 root = ET.fromstring(res.content)
                 
-                # 에러코드 캐치 (00이 정상)
                 result_code = root.findtext('.//resultCode')
                 if result_code and result_code != '00':
                     err_msg = root.findtext('.//resultMsg', '알 수 없는 조달청 오류')
                     st.session_state.retry_time = now + timedelta(minutes=30)
-                    return pd.DataFrame(), f"🚨 API 거부: {err_msg} ({result_code})"
+                    return pd.DataFrame(), f"🚨 API 거부됨: {err_msg} ({result_code})"
 
                 total_count_str = root.findtext('.//totalCount')
                 if total_count_str:
@@ -152,7 +151,6 @@ def update_realtime_data():
                     raw_corp = item.findtext('corpNm', '')
                     norm_corp = normalize_corp_name(raw_corp)
                     
-                    # 스마트 이름 매칭 발동 (예: '(주)세오' -> '주식회사 세오'로 변환 합산)
                     if norm_corp in TARGET_MAP:
                         matched_corp_name = TARGET_MAP[norm_corp]
                         all_new_data.append({
@@ -164,7 +162,7 @@ def update_realtime_data():
                             'MAS여부': item.findtext('masYn', 'Y').strip().upper() 
                         })
                 
-                if page_no * 999 >= total_count: break
+                if page_no * 100 >= total_count: break
                 page_no += 1
             else: 
                 break
@@ -172,7 +170,7 @@ def update_realtime_data():
         st.session_state.last_update = now.strftime('%H:%M:%S')
         if all_new_data:
             st.session_state.api_df = pd.DataFrame(all_new_data)
-            return st.session_state.api_df, f"🟢 전국 {total_count:,}건 스캔 -> 타겟 {len(all_new_data)}건(세오 등) 수집 성공!"
+            return st.session_state.api_df, f"🟢 전국 {total_count:,}건 스캔 완료 -> 세오 등 타겟 {len(all_new_data)}건 수집 성공!"
         
         return pd.DataFrame(), f"🔵 전국 {total_count:,}건 스캔 완료 (타겟 실적 0건)"
         
@@ -185,11 +183,10 @@ df_hist = load_historical_data()
 df_api, api_msg = update_realtime_data()
 df_total = pd.concat([df_hist, df_api], ignore_index=True) if not df_api.empty else df_hist.copy()
 
-# 💡 [유지] '무인교통감시장치' 데이터 영구 제외 
 if not df_total.empty and '물품분류명' in df_total.columns:
     df_total = df_total[~df_total['물품분류명'].astype(str).str.contains('무인교통감시장치', na=False)]
 
-st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v10.1</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v11.0</div>", unsafe_allow_html=True)
 st.markdown(f"<div class='update-time'>🕒 마지막 업데이트(KST): {st.session_state.last_update} | 상태: {api_msg}</div>", unsafe_allow_html=True)
 
 # --- 6. 사이드바 필터 ---
