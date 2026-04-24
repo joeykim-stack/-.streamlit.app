@@ -22,7 +22,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- 2. 분석 대상 업체 ---
+# --- 2. 분석 대상 업체 및 제외 품목 세팅 ---
 TARGET_COMPANIES = [
     "주식회사 티제이원", "주식회사 파로스", "주식회사 포딕스시스템", "주식회사 세오", 
     "주식회사 펜타게이트", "주식회사 홍석", "주식회사 솔디아", "주식회사 정현씨앤씨", "주식회사 디라직", 
@@ -37,6 +37,18 @@ TARGET_COMPANIES = [
     "주식회사 제이한테크", "주식회사 아라드네트웍스", "주식회사 진명아이앤씨", "렉스젠 주식회사", 
     "주식회사 디케이앤트", "사이테크놀로지스 주식회사", "주식회사 송우인포텍", "주식회사 아이엔아이", 
     "비티에스 주식회사", "주식회사 인텔리빅스", "주식회사 비알인포텍"
+]
+
+# 💡 [핵심] 영구 차단할 쓰레기 품목 리스트 (총 33개)
+EXCLUDE_ITEMS = [
+    "무인교통감시장치", "교통관제시스템", "구내방송장치", "마이크로폰", "마이크스탠드", 
+    "무선마이크장치", "버스승강장", "보행자안전차단기", "산업제어소프트웨어", "생체인식장비", 
+    "세탁물건조기", "소프트웨어유지및지원서비스", "스트로보또는경고등", "스피커스탠드", 
+    "스피커제어유닛", "업소용세탁기", "오디오모니터", "오디오믹서", "증폭기결합", "오디오앰프", 
+    "오이도장비커넥터및스테이지박스", "오디오장비커넥터및스테이지박스", "이퀄라이저", 
+    "정보화교육서비스", "주차관제장치", "차량번호판독기", "출입통제시스템", "태양전지조절기", 
+    "파일시스템소프트웨어", "패키지소프트웨어개발및도입서비스", "플러그용잭", "해석또는과학소프트웨어", 
+    "화재경보장치"
 ]
 
 def normalize_corp_name(name):
@@ -100,7 +112,7 @@ def update_realtime_data():
     
     now = get_now_kst()
     if st.session_state.retry_time and now < st.session_state.retry_time:
-        return st.session_state.api_df, f"⏳ 대기 중 (다음 시도 KST: {st.session_state.retry_time.strftime('%H:%M:%S')})"
+        return st.session_state.api_df, f"⏳ 대기 중 (다음 시도: {st.session_state.retry_time.strftime('%H:%M:%S')})"
     
     try:
         API_KEY = "c1b379f7734c7d624ddefea07510eae71b6e12c5fb89970319d76c5ae8db5248"
@@ -180,7 +192,7 @@ def update_realtime_data():
         st.session_state.retry_time = now + timedelta(minutes=5)
         return pd.DataFrame(), f"⚠️ 파싱 에러: {str(e)}"
 
-# --- 5. 데이터 통합 실행 ---
+# --- 5. 데이터 통합 실행 (💡 중복 제거 & 품목 필터링) ---
 df_hist = load_historical_data()
 df_api, api_msg = update_realtime_data()
 
@@ -190,10 +202,12 @@ if not df_api.empty:
 else:
     df_total = df_hist.copy()
 
+# 💡 [강력 필터] 33개 쓸데없는 품목 원천 차단!
 if not df_total.empty and '물품분류명' in df_total.columns:
-    df_total = df_total[~df_total['물품분류명'].astype(str).str.contains('무인교통감시장치', na=False)]
+    pattern = '|'.join(EXCLUDE_ITEMS)
+    df_total = df_total[~df_total['물품분류명'].astype(str).str.contains(pattern, na=False, regex=True)]
 
-st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v17.1</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v17.2</div>", unsafe_allow_html=True)
 st.markdown(f"<div class='update-time'>🕒 마지막 업데이트(KST): {st.session_state.last_update} | 상태: {api_msg}</div>", unsafe_allow_html=True)
 
 # --- 6. 사이드바 필터 ---
@@ -265,7 +279,7 @@ else:
 
     st.markdown("---")
 
-    # 💡 랭킹 보드 생성 전용 팩토리 함수 (코드를 깔끔하게 유지하기 위함)
+    # 💡 랭킹 보드 생성 전용 함수
     def render_ranking_board(df_data, title, show_count_col, sort_key, dl_key, cmap_color='Blues'):
         st.subheader(title)
         
@@ -347,7 +361,7 @@ else:
         cmap_color='Blues'
     )
 
-    st.markdown("<br><br>", unsafe_allow_html=True) # 보드 사이 여백
+    st.markdown("<br><br>", unsafe_allow_html=True)
 
     # 🥈 MAS 전용 랭킹 보드 렌더링 (초록색)
     board_df_mas = df_f[df_f['MAS여부'] == 'Y'].copy()
