@@ -6,7 +6,6 @@ from datetime import datetime, timedelta
 import plotly.express as px
 import plotly.graph_objects as go
 from io import BytesIO
-import urllib.parse
 
 # --- 1. 기본 설정 및 KST 시계 ---
 st.set_page_config(page_title="조달청 실적 분석 대시보드", layout="wide")
@@ -39,12 +38,11 @@ TARGET_COMPANIES = [
     "비티에스 주식회사", "주식회사 인텔리빅스", "주식회사 비알인포텍"
 ]
 
-# 💡 스마트 이름 정규화 함수 (주식회사, (주), 공백 완벽 제거)
+# 💡 스마트 이름 정규화 함수
 def normalize_corp_name(name):
     if not name: return ""
     return name.replace('주식회사', '').replace('(주)', '').replace(' ', '').strip()
 
-# 사전 정규화된 타겟 업체 딕셔너리 생성 (검색 속도 향상)
 TARGET_MAP = {normalize_corp_name(comp): comp for comp in TARGET_COMPANIES}
 
 # --- 3. [로컬 데이터] ---
@@ -82,9 +80,8 @@ def load_historical_data():
             temp_df.columns = ['업체명', '물품분류명', '금액', '납품요구번호']
             temp_df['월'] = target_month
             
-            # 💡 로컬 데이터도 스마트 매칭 적용
             temp_df['업체명'] = temp_df['업체명'].astype(str).apply(lambda x: TARGET_MAP.get(normalize_corp_name(x), None))
-            temp_df = temp_df.dropna(subset=['업체명']) # 타겟이 아닌 업체는 버림
+            temp_df = temp_df.dropna(subset=['업체명'])
             
             if 'MAS여부' in df.columns:
                 temp_df['MAS여부'] = df['MAS여부'].fillna('N').astype(str).str.strip().str.upper()
@@ -95,7 +92,7 @@ def load_historical_data():
         except Exception: continue
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
-# --- 4. [실시간 API] 스마트 매칭 & 제한 해제 ---
+# --- 4. [실시간 API] 잃어버린 황금 주소 복구 엔진 ---
 def update_realtime_data():
     if 'api_df' not in st.session_state: st.session_state.api_df = pd.DataFrame()
     if 'last_update' not in st.session_state: st.session_state.last_update = "업데이트 전"
@@ -106,39 +103,45 @@ def update_realtime_data():
         return st.session_state.api_df, f"⏳ 대기 중 (다음 시도 KST: {st.session_state.retry_time.strftime('%H:%M:%S')})"
     
     try:
-        RAW_KEY = "c1b379f7734c7d624ddefea07510eae71b6e12c5fb89970319d76c5ae8db5248"
-        API_KEY = urllib.parse.unquote(RAW_KEY)
-        URL = "http://apis.data.go.kr/1230000/ShoppingMallPrdctInfoService05/getDlvrReqInfoList"
+        # 💡 [핵심 복구] 파로스 8.7억을 찾아냈던 인증키 전용 실제 개방 주소 완벽 롤백
+        API_KEY = "c1b379f7734c7d624ddefea07510eae71b6e12c5fb89970319d76c5ae8db5248"
+        URL = "http://apis.data.go.kr/1230000/at/ShoppingMallPrdctInfoService/getDlvrReqInfoList"
         
         all_new_data = []
         page_no = 1
         raw_scanned_count = 0
         
         while True:
+            # 💡 혹시 모를 파라미터 매칭 오류를 막기 위해 Date와 Dt 모두 전송
             params = {
                 'serviceKey': API_KEY, 
                 'numOfRows': '100', 
                 'pageNo': str(page_no),
                 'inqryDiv': '1', 
                 'inqryBgnDate': '20260420', 
-                'inqryEndDate': now.strftime('%Y%m%d')
+                'inqryEndDate': now.strftime('%Y%m%d'),
+                'inqryBgnDt': '20260420', 
+                'inqryEndDt': now.strftime('%Y%m%d')
             }
             
-            query_string = "&".join([f"{k}={v}" for k, v in params.items()])
-            full_url = f"{URL}?{query_string}"
+            # 💡 수동 인코딩 에러 방지 (requests의 안전한 방식 사용)
+            res = requests.get(URL, params=params, timeout=15)
             
-            res = requests.get(full_url, timeout=15)
             if res.status_code == 200:
                 root = ET.fromstring(res.content)
+                
+                # 💡 API 에러(키 오류, 트래픽 초과 등)를 조용히 0건으로 넘기지 않고 잡아내는 로직
+                result_code = root.findtext('.//resultCode')
+                if result_code and result_code != '00':
+                    err_msg = root.findtext('.//resultMsg', '알 수 없는 조달청 오류')
+                    st.session_state.retry_time = now + timedelta(minutes=30)
+                    return pd.DataFrame(), f"🚨 API 에러 거부됨: {err_msg}"
+
                 items = root.findall('.//item')
                 if not items: break
                 
                 for item in items:
                     raw_scanned_count += 1
-                    
-                    # 💡 [핵심] 쓸데없는 계약 형태 필터 완전 삭제! (쇼핑몰 데이터면 무조건 품음)
-                    
-                    # 💡 [핵심] 스마트 이름 매칭 ((주)파로스 -> 주식회사 파로스 변환)
                     raw_corp = item.findtext('corpNm', '')
                     norm_corp = normalize_corp_name(raw_corp)
                     
@@ -159,16 +162,16 @@ def update_realtime_data():
             else: 
                 break
 
-        # 💡 투명한 알림창 (전국 데이터 몇 개를 뒤졌는지 확인)
         st.session_state.last_update = now.strftime('%H:%M:%S')
         if all_new_data:
             st.session_state.api_df = pd.DataFrame(all_new_data)
             return st.session_state.api_df, f"🟢 4/20 이후 {len(all_new_data)}건 수집 완료 (전국 {raw_scanned_count}건 스캔)"
         
-        return st.session_state.api_df, f"🔵 전국 {raw_scanned_count}건 스캔했으나, 타겟 52개사 실적은 0건입니다."
+        return pd.DataFrame(), f"🔵 전국 {raw_scanned_count}건 스캔했으나 타겟 실적 없음."
+        
     except Exception as e:
         st.session_state.retry_time = now + timedelta(minutes=30)
-        return st.session_state.api_df, "⚠️ 통신 장애 (30분 뒤 재시도)"
+        return pd.DataFrame(), "⚠️ 통신 장애 (30분 뒤 재시도)"
 
 # --- 5. 데이터 통합 실행 및 무인교통감시장치 영구 차단 ---
 df_hist = load_historical_data()
@@ -178,7 +181,7 @@ df_total = pd.concat([df_hist, df_api], ignore_index=True) if not df_api.empty e
 if not df_total.empty and '물품분류명' in df_total.columns:
     df_total = df_total[~df_total['물품분류명'].astype(str).str.contains('무인교통감시장치', na=False)]
 
-st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v9.7</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v9.8</div>", unsafe_allow_html=True)
 st.markdown(f"<div class='update-time'>🕒 마지막 업데이트(KST): {st.session_state.last_update} | 상태: {api_msg}</div>", unsafe_allow_html=True)
 
 # --- 6. 사이드바 필터 ---
