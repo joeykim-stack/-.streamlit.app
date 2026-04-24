@@ -92,7 +92,7 @@ def load_historical_data():
         except Exception: continue
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
-# --- 4. [실시간 API] 원래 가장 잘 되던 황금 로직 완벽 복원 ---
+# --- 4. [실시간 API] ---
 def update_realtime_data():
     if 'api_df' not in st.session_state: st.session_state.api_df = pd.DataFrame()
     if 'last_update' not in st.session_state: st.session_state.last_update = "업데이트 전"
@@ -100,14 +100,12 @@ def update_realtime_data():
     
     now = get_now_kst()
     if st.session_state.retry_time and now < st.session_state.retry_time:
-        return st.session_state.api_df, f"⏳ 대기 중 (다음 시도: {st.session_state.retry_time.strftime('%H:%M:%S')})"
+        return st.session_state.api_df, f"⏳ 대기 중 (다음 시도 KST: {st.session_state.retry_time.strftime('%H:%M:%S')})"
     
     try:
         API_KEY = "c1b379f7734c7d624ddefea07510eae71b6e12c5fb89970319d76c5ae8db5248"
-        # 💡 [핵심 복구 1] 파로스 8.7억을 찾아냈던 전설의 '/at/' 주소 복원
         URL = "http://apis.data.go.kr/1230000/at/ShoppingMallPrdctInfoService/getDlvrReqInfoList"
         
-        # 💡 [핵심 복구 2] 500 에러를 막기 위해 무조건 데이터가 있는 '이달 1일'부터 넉넉하게 스캔!
         bgn_date = now.strftime('%Y%m') + '01'
         end_date = now.strftime('%Y%m%d')
         
@@ -116,7 +114,6 @@ def update_realtime_data():
         total_count = 0
         
         while True:
-            # 과거에 100% 성공했던 가장 순수한 파라미터 세팅
             params = {
                 'serviceKey': API_KEY, 
                 'numOfRows': '999', 
@@ -155,7 +152,6 @@ def update_realtime_data():
             if not items: break
             
             for item in items:
-                # 💡 [핵심 복구 3] 너무 깐깐했던 필터 삭제 (쇼핑몰 API면 일단 다 품는다)
                 raw_corp = item.findtext('corpNm', '')
                 norm_corp = normalize_corp_name(raw_corp)
                 
@@ -184,11 +180,10 @@ def update_realtime_data():
         st.session_state.retry_time = now + timedelta(minutes=5)
         return pd.DataFrame(), f"⚠️ 파싱 에러: {str(e)}"
 
-# --- 5. 데이터 통합 실행 (💡 핵심: 스마트 중복 제거) ---
+# --- 5. 데이터 통합 실행 ---
 df_hist = load_historical_data()
 df_api, api_msg = update_realtime_data()
 
-# API 데이터와 엑셀 데이터 합친 뒤, 중복되는 납품요구번호는 최신 API 기준으로 1개만 남기고 싹 지움!
 if not df_api.empty:
     df_total = pd.concat([df_hist, df_api], ignore_index=True)
     df_total = df_total.drop_duplicates(subset=['납품요구번호'], keep='last')
@@ -198,7 +193,7 @@ else:
 if not df_total.empty and '물품분류명' in df_total.columns:
     df_total = df_total[~df_total['물품분류명'].astype(str).str.contains('무인교통감시장치', na=False)]
 
-st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v17.0</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v17.1</div>", unsafe_allow_html=True)
 st.markdown(f"<div class='update-time'>🕒 마지막 업데이트(KST): {st.session_state.last_update} | 상태: {api_msg}</div>", unsafe_allow_html=True)
 
 # --- 6. 사이드바 필터 ---
@@ -222,7 +217,7 @@ with st.sidebar:
             if cb_key not in st.session_state: st.session_state[cb_key] = True
             if st.checkbox(item, key=cb_key): selected_items.append(item)
 
-# --- 7. 메인 화면 ---
+# --- 7. 메인 화면 (요약 & 차트) ---
 if not selected_items:
     st.info("👈 왼쪽 사이드바에서 분석할 품목을 1개 이상 선택해주세요.")
 else:
@@ -270,48 +265,43 @@ else:
 
     st.markdown("---")
 
-    st.subheader("📋 업체별 종합 실적 랭킹 보드")
-    
-    ctrl_col1, ctrl_col2, ctrl_col3 = st.columns([1.2, 1.2, 1])
-    with ctrl_col1:
-        show_cnt = st.checkbox("📝 월/분기별 계약건수 함께 보기", value=False)
-    with ctrl_col2:
-        include_mas = st.checkbox("🏢 MAS 계약 포함 (해제 시 '우수조달'만 표시)", value=True)
+    # 💡 랭킹 보드 생성 전용 팩토리 함수 (코드를 깔끔하게 유지하기 위함)
+    def render_ranking_board(df_data, title, show_count_col, sort_key, dl_key, cmap_color='Blues'):
+        st.subheader(title)
         
-    board_df = df_f.copy()
-    if not include_mas:
-        board_df = board_df[board_df['MAS여부'] == 'N']
-
-    p_amt = pd.pivot_table(board_df, values='금액', index='업체명', columns='월', aggfunc='sum', fill_value=0).reset_index()
-    for m in ['1월', '2월', '3월', '4월']:
-        if m not in p_amt.columns: p_amt[m] = 0
-    p_amt['1분기 합계'] = p_amt['1월'] + p_amt['2월'] + p_amt['3월']
-    p_amt['누적 합계'] = p_amt['1분기 합계'] + p_amt['4월']
-    
-    p_cnt = pd.pivot_table(board_df, values='납품요구번호', index='업체명', columns='월', aggfunc='nunique', fill_value=0).reset_index()
-    for m in ['1월', '2월', '3월', '4월']:
-        if m not in p_cnt.columns: p_cnt[m] = 0
-    p_cnt['1분기(건)'] = p_cnt['1월'] + p_cnt['2월'] + p_cnt['3월']
-    p_cnt['누적(건)'] = p_cnt['1분기(건)'] + p_cnt['4월']
-    p_cnt.rename(columns={'1월':'1월(건)', '2월':'2월(건)', '3월':'3월(건)', '4월':'4월(건)'}, inplace=True)
-    
-    final = pd.merge(p_amt, p_cnt, on='업체명', how='outer').fillna(0)
-    
-    if show_cnt:
-        disp_cols = ['업체명', '1월', '1월(건)', '2월', '2월(건)', '3월', '3월(건)', '1분기 합계', '1분기(건)', '4월', '4월(건)', '누적 합계', '누적(건)']
-    else:
-        disp_cols = ['업체명', '1월', '2월', '3월', '1분기 합계', '4월', '누적 합계']
+        ctrl_col1, ctrl_col2 = st.columns([2.4, 1])
         
-    if final.empty:
-        st.warning("선택하신 조건에 해당하는 실적이 없습니다.")
-    else:
+        p_amt = pd.pivot_table(df_data, values='금액', index='업체명', columns='월', aggfunc='sum', fill_value=0).reset_index()
+        for m in ['1월', '2월', '3월', '4월']:
+            if m not in p_amt.columns: p_amt[m] = 0
+        p_amt['1분기 합계'] = p_amt['1월'] + p_amt['2월'] + p_amt['3월']
+        p_amt['누적 합계'] = p_amt['1분기 합계'] + p_amt['4월']
+        
+        p_cnt = pd.pivot_table(df_data, values='납품요구번호', index='업체명', columns='월', aggfunc='nunique', fill_value=0).reset_index()
+        for m in ['1월', '2월', '3월', '4월']:
+            if m not in p_cnt.columns: p_cnt[m] = 0
+        p_cnt['1분기(건)'] = p_cnt['1월'] + p_cnt['2월'] + p_cnt['3월']
+        p_cnt['누적(건)'] = p_cnt['1분기(건)'] + p_cnt['4월']
+        p_cnt.rename(columns={'1월':'1월(건)', '2월':'2월(건)', '3월':'3월(건)', '4월':'4월(건)'}, inplace=True)
+        
+        final = pd.merge(p_amt, p_cnt, on='업체명', how='outer').fillna(0)
+        
+        if show_count_col:
+            disp_cols = ['업체명', '1월', '1월(건)', '2월', '2월(건)', '3월', '3월(건)', '1분기 합계', '1분기(건)', '4월', '4월(건)', '누적 합계', '누적(건)']
+        else:
+            disp_cols = ['업체명', '1월', '2월', '3월', '1분기 합계', '4월', '누적 합계']
+            
+        if final.empty:
+            st.warning("해당 조건의 실적이 없습니다.")
+            return
+            
         final = final[disp_cols]
-    
-        with ctrl_col3:
+        
+        with ctrl_col2:
             sort_options = [c for c in disp_cols if c != '업체명']
             default_idx = sort_options.index('누적 합계')
-            sort_target = st.selectbox("⬇️ 랭킹 정렬 기준", options=sort_options, index=default_idx, label_visibility="collapsed")
-        
+            sort_target = st.selectbox("⬇️ 정렬 기준", options=sort_options, index=default_idx, label_visibility="collapsed", key=sort_key)
+            
         final = final.sort_values(sort_target, ascending=False).reset_index(drop=True)
         final.insert(0, '랭킹 No.', range(1, len(final) + 1))
         
@@ -320,16 +310,54 @@ else:
         styled = styled.set_properties(subset=['업체명'], **{'background-color': 'rgba(128, 128, 128, 0.1)', 'font-weight': 'bold'})
         styled = styled.set_properties(subset=[c for c in final.columns if '월' in c and '(' not in c], **{'background-color': 'rgba(54, 162, 235, 0.05)'})
         styled = styled.set_properties(subset=['1분기 합계'], **{'background-color': 'rgba(255, 159, 64, 0.1)', 'font-weight': 'bold'})
-        if show_cnt:
+        if show_count_col:
             styled = styled.set_properties(subset=[c for c in final.columns if '(건)' in c], **{'background-color': 'rgba(76, 175, 80, 0.05)'})
             
-        styled = styled.background_gradient(subset=[sort_target], cmap='Blues')
+        styled = styled.background_gradient(subset=[sort_target], cmap=cmap_color)
         
         st.dataframe(styled, use_container_width=True, hide_index=True)
 
         xlsx = BytesIO()
         with pd.ExcelWriter(xlsx, engine='xlsxwriter') as wr:
             final.to_excel(wr, index=False, sheet_name='실적랭킹')
-        st.download_button("💾 엑셀 보고서 다운로드", xlsx.getvalue(), f'조달업체랭킹_{get_now_kst().strftime("%Y%m%d")}.xlsx')
+        st.download_button("💾 엑셀 다운로드", xlsx.getvalue(), f'조달랭킹_{dl_key}_{get_now_kst().strftime("%Y%m%d")}.xlsx', key=dl_key)
+
+
+    # --- 8. 랭킹 보드 출력 영역 ---
+    st.subheader("⚙️ 랭킹 보드 컨트롤")
+    ctrl_col_a, ctrl_col_b = st.columns(2)
+    with ctrl_col_a:
+        show_cnt = st.checkbox("📝 월/분기별 계약건수 함께 보기", value=False)
+    with ctrl_col_b:
+        include_mas = st.checkbox("🏢 종합 랭킹에 MAS 계약 포함 (해제 시 '우수조달'만 표시)", value=True)
+
+    st.markdown("---")
+
+    # 🥇 종합 랭킹 보드 렌더링 (파란색)
+    board_df_total = df_f.copy()
+    if not include_mas:
+        board_df_total = board_df_total[board_df_total['MAS여부'] == 'N']
+        
+    render_ranking_board(
+        df_data=board_df_total, 
+        title="🏆 업체별 종합 실적 랭킹 (우수조달 + MAS)", 
+        show_count_col=show_cnt, 
+        sort_key='sort_total', 
+        dl_key='dl_total', 
+        cmap_color='Blues'
+    )
+
+    st.markdown("<br><br>", unsafe_allow_html=True) # 보드 사이 여백
+
+    # 🥈 MAS 전용 랭킹 보드 렌더링 (초록색)
+    board_df_mas = df_f[df_f['MAS여부'] == 'Y'].copy()
+    render_ranking_board(
+        df_data=board_df_mas, 
+        title="🏢 MAS 계약 전용 실적 랭킹", 
+        show_count_col=show_cnt, 
+        sort_key='sort_mas', 
+        dl_key='dl_mas', 
+        cmap_color='Greens'
+    )
 
 st.markdown("<br><center style='color:gray;'>Copyright(C) 2026 Joey Kim. Data from Public Data Portal.</center>", unsafe_allow_html=True)
