@@ -39,6 +39,14 @@ TARGET_COMPANIES = [
     "비티에스 주식회사", "주식회사 인텔리빅스", "주식회사 비알인포텍"
 ]
 
+# 💡 스마트 이름 정규화 함수 (주식회사, (주), 공백 완벽 제거)
+def normalize_corp_name(name):
+    if not name: return ""
+    return name.replace('주식회사', '').replace('(주)', '').replace(' ', '').strip()
+
+# 사전 정규화된 타겟 업체 딕셔너리 생성 (검색 속도 향상)
+TARGET_MAP = {normalize_corp_name(comp): comp for comp in TARGET_COMPANIES}
+
 # --- 3. [로컬 데이터] ---
 @st.cache_data(ttl=3600)
 def load_historical_data():
@@ -73,18 +81,21 @@ def load_historical_data():
             temp_df = df[['업체명', '물품분류명', '금액', req_col]].copy()
             temp_df.columns = ['업체명', '물품분류명', '금액', '납품요구번호']
             temp_df['월'] = target_month
-            temp_df['업체명'] = temp_df['업체명'].astype(str).str.strip()
+            
+            # 💡 로컬 데이터도 스마트 매칭 적용
+            temp_df['업체명'] = temp_df['업체명'].astype(str).apply(lambda x: TARGET_MAP.get(normalize_corp_name(x), None))
+            temp_df = temp_df.dropna(subset=['업체명']) # 타겟이 아닌 업체는 버림
             
             if 'MAS여부' in df.columns:
                 temp_df['MAS여부'] = df['MAS여부'].fillna('N').astype(str).str.strip().str.upper()
             else:
                 temp_df['MAS여부'] = 'Y' 
                 
-            dfs.append(temp_df[temp_df['업체명'].isin(TARGET_COMPANIES)])
+            dfs.append(temp_df)
         except Exception: continue
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
-# --- 4. [실시간 API] 버그 완벽 픽스 엔진 ---
+# --- 4. [실시간 API] 스마트 매칭 & 제한 해제 ---
 def update_realtime_data():
     if 'api_df' not in st.session_state: st.session_state.api_df = pd.DataFrame()
     if 'last_update' not in st.session_state: st.session_state.last_update = "업데이트 전"
@@ -95,17 +106,15 @@ def update_realtime_data():
         return st.session_state.api_df, f"⏳ 대기 중 (다음 시도 KST: {st.session_state.retry_time.strftime('%H:%M:%S')})"
     
     try:
-        # 💡 [버그픽스 1] 파이썬 requests 이중 인코딩 방지 처리
         RAW_KEY = "c1b379f7734c7d624ddefea07510eae71b6e12c5fb89970319d76c5ae8db5248"
         API_KEY = urllib.parse.unquote(RAW_KEY)
-        
-        # 💡 [버그픽스 2] V5 API 정확한 엔드포인트 복구 (이상한 /at/ 경로 삭제)
         URL = "http://apis.data.go.kr/1230000/ShoppingMallPrdctInfoService05/getDlvrReqInfoList"
+        
         all_new_data = []
         page_no = 1
+        raw_scanned_count = 0
         
         while True:
-            # 💡 [버그픽스 3] numOfRows를 999에서 100으로 롤백하여 서버 500 에러 방어
             params = {
                 'serviceKey': API_KEY, 
                 'numOfRows': '100', 
@@ -115,7 +124,6 @@ def update_realtime_data():
                 'inqryEndDate': now.strftime('%Y%m%d')
             }
             
-            # 파라미터 수동 조립 (조달청 서버 호환성 극대화)
             query_string = "&".join([f"{k}={v}" for k, v in params.items()])
             full_url = f"{URL}?{query_string}"
             
@@ -126,15 +134,18 @@ def update_realtime_data():
                 if not items: break
                 
                 for item in items:
-                    # 💡 [버그픽스 4] '제3자단가' 계약만 쏙쏙 골라내기 (핵심 누락 복구!)
-                    cntrct_stle = item.findtext('cntrctCnclsStleNm', '')
-                    if '제3자단가' not in cntrct_stle:
-                        continue
-                        
-                    corp = item.findtext('corpNm', '').strip()
-                    if corp in TARGET_COMPANIES:
+                    raw_scanned_count += 1
+                    
+                    # 💡 [핵심] 쓸데없는 계약 형태 필터 완전 삭제! (쇼핑몰 데이터면 무조건 품음)
+                    
+                    # 💡 [핵심] 스마트 이름 매칭 ((주)파로스 -> 주식회사 파로스 변환)
+                    raw_corp = item.findtext('corpNm', '')
+                    norm_corp = normalize_corp_name(raw_corp)
+                    
+                    if norm_corp in TARGET_MAP:
+                        matched_corp_name = TARGET_MAP[norm_corp]
                         all_new_data.append({
-                            '업체명': corp, 
+                            '업체명': matched_corp_name, 
                             '물품분류명': item.findtext('prdctClsfcNm', ''), 
                             '금액': float(item.findtext('dlvrReqAmt', 0)), 
                             '납품요구번호': item.findtext('dlvrReqNo', f'API_{now.timestamp()}'), 
@@ -148,13 +159,13 @@ def update_realtime_data():
             else: 
                 break
 
+        # 💡 투명한 알림창 (전국 데이터 몇 개를 뒤졌는지 확인)
+        st.session_state.last_update = now.strftime('%H:%M:%S')
         if all_new_data:
             st.session_state.api_df = pd.DataFrame(all_new_data)
-            st.session_state.last_update = now.strftime('%H:%M:%S')
-            return st.session_state.api_df, f"🟢 4/20 이후 실시간 수집 완료 ({page_no}P)"
+            return st.session_state.api_df, f"🟢 4/20 이후 {len(all_new_data)}건 수집 완료 (전국 {raw_scanned_count}건 스캔)"
         
-        st.session_state.last_update = now.strftime('%H:%M:%S')
-        return st.session_state.api_df, "🔵 4/20 이후 추가 실적 없음"
+        return st.session_state.api_df, f"🔵 전국 {raw_scanned_count}건 스캔했으나, 타겟 52개사 실적은 0건입니다."
     except Exception as e:
         st.session_state.retry_time = now + timedelta(minutes=30)
         return st.session_state.api_df, "⚠️ 통신 장애 (30분 뒤 재시도)"
@@ -167,7 +178,7 @@ df_total = pd.concat([df_hist, df_api], ignore_index=True) if not df_api.empty e
 if not df_total.empty and '물품분류명' in df_total.columns:
     df_total = df_total[~df_total['물품분류명'].astype(str).str.contains('무인교통감시장치', na=False)]
 
-st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v9.6</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v9.7</div>", unsafe_allow_html=True)
 st.markdown(f"<div class='update-time'>🕒 마지막 업데이트(KST): {st.session_state.last_update} | 상태: {api_msg}</div>", unsafe_allow_html=True)
 
 # --- 6. 사이드바 필터 ---
