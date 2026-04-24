@@ -92,7 +92,7 @@ def load_historical_data():
         except Exception: continue
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
-# --- 4. [실시간 API] 잃어버린 황금 주소 복구 엔진 ---
+# --- 4. [실시간 API] V5 순정 엔진 롤백 ---
 def update_realtime_data():
     if 'api_df' not in st.session_state: st.session_state.api_df = pd.DataFrame()
     if 'last_update' not in st.session_state: st.session_state.last_update = "업데이트 전"
@@ -103,39 +103,42 @@ def update_realtime_data():
         return st.session_state.api_df, f"⏳ 대기 중 (다음 시도 KST: {st.session_state.retry_time.strftime('%H:%M:%S')})"
     
     try:
-        # 💡 [핵심 복구] 파로스 8.7억을 찾아냈던 인증키 전용 실제 개방 주소 완벽 롤백
         API_KEY = "c1b379f7734c7d624ddefea07510eae71b6e12c5fb89970319d76c5ae8db5248"
-        URL = "http://apis.data.go.kr/1230000/at/ShoppingMallPrdctInfoService/getDlvrReqInfoList"
+        # 💡 [핵심] V5 최신 서버로 다시 복구
+        URL = "http://apis.data.go.kr/1230000/ShoppingMallPrdctInfoService05/getDlvrReqInfoList"
         
         all_new_data = []
         page_no = 1
         raw_scanned_count = 0
+        total_count = 0
         
         while True:
-            # 💡 혹시 모를 파라미터 매칭 오류를 막기 위해 Date와 Dt 모두 전송
+            # 💡 [핵심] 이상한 가짜 파라미터 싹 지우고 매뉴얼 100% 순정 상태로 전송
             params = {
                 'serviceKey': API_KEY, 
-                'numOfRows': '100', 
+                'numOfRows': '999', 
                 'pageNo': str(page_no),
                 'inqryDiv': '1', 
                 'inqryBgnDate': '20260420', 
-                'inqryEndDate': now.strftime('%Y%m%d'),
-                'inqryBgnDt': '20260420', 
-                'inqryEndDt': now.strftime('%Y%m%d')
+                'inqryEndDate': now.strftime('%Y%m%d')
             }
             
-            # 💡 수동 인코딩 에러 방지 (requests의 안전한 방식 사용)
             res = requests.get(URL, params=params, timeout=15)
             
             if res.status_code == 200:
                 root = ET.fromstring(res.content)
                 
-                # 💡 API 에러(키 오류, 트래픽 초과 등)를 조용히 0건으로 넘기지 않고 잡아내는 로직
+                # API 에러 코드 캐치
                 result_code = root.findtext('.//resultCode')
                 if result_code and result_code != '00':
-                    err_msg = root.findtext('.//resultMsg', '알 수 없는 조달청 오류')
+                    err_msg = root.findtext('.//resultMsg', '알 수 없는 오류')
                     st.session_state.retry_time = now + timedelta(minutes=30)
-                    return pd.DataFrame(), f"🚨 API 에러 거부됨: {err_msg}"
+                    return pd.DataFrame(), f"🚨 API 거부: {err_msg} ({result_code})"
+
+                # 전체 데이터 개수 추출
+                total_count_str = root.findtext('.//totalCount')
+                if total_count_str:
+                    total_count = int(total_count_str)
 
                 items = root.findall('.//item')
                 if not items: break
@@ -156,8 +159,7 @@ def update_realtime_data():
                             'MAS여부': item.findtext('masYn', 'Y').strip().upper() 
                         })
                 
-                total_count = int(root.findtext('.//totalCount', '0'))
-                if page_no * 100 >= total_count: break
+                if page_no * 999 >= total_count: break
                 page_no += 1
             else: 
                 break
@@ -165,9 +167,9 @@ def update_realtime_data():
         st.session_state.last_update = now.strftime('%H:%M:%S')
         if all_new_data:
             st.session_state.api_df = pd.DataFrame(all_new_data)
-            return st.session_state.api_df, f"🟢 4/20 이후 {len(all_new_data)}건 수집 완료 (전국 {raw_scanned_count}건 스캔)"
+            return st.session_state.api_df, f"🟢 전국 {total_count:,}건 스캔 완료 -> 타겟 {len(all_new_data)}건 수집!"
         
-        return pd.DataFrame(), f"🔵 전국 {raw_scanned_count}건 스캔했으나 타겟 실적 없음."
+        return pd.DataFrame(), f"🔵 전국 {total_count:,}건 스캔했으나 타겟 실적 없음."
         
     except Exception as e:
         st.session_state.retry_time = now + timedelta(minutes=30)
@@ -181,7 +183,7 @@ df_total = pd.concat([df_hist, df_api], ignore_index=True) if not df_api.empty e
 if not df_total.empty and '물품분류명' in df_total.columns:
     df_total = df_total[~df_total['물품분류명'].astype(str).str.contains('무인교통감시장치', na=False)]
 
-st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v9.8</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v9.9</div>", unsafe_allow_html=True)
 st.markdown(f"<div class='update-time'>🕒 마지막 업데이트(KST): {st.session_state.last_update} | 상태: {api_msg}</div>", unsafe_allow_html=True)
 
 # --- 6. 사이드바 필터 ---
@@ -221,7 +223,6 @@ else:
     c3.metric("📊 건당 평균 실적", f"{(t_amt/t_cnt if t_cnt>0 else 0):,.0f} 원")
     st.markdown("---")
 
-    # 📈 차트 영역
     col_a, col_b = st.columns(2)
     with col_a:
         st.subheader("📈 실적 추이")
@@ -254,7 +255,6 @@ else:
 
     st.markdown("---")
 
-    # 📋 8. 업체별 종합 랭킹 보드
     st.subheader("📋 업체별 종합 실적 랭킹 보드")
     
     ctrl_col1, ctrl_col2, ctrl_col3 = st.columns([1.2, 1.2, 1])
