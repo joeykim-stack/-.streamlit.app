@@ -6,6 +6,8 @@ from datetime import datetime, timedelta
 import plotly.express as px
 import plotly.graph_objects as go
 from io import BytesIO
+import urllib.parse
+import time
 
 # --- 1. 기본 설정 및 KST 시계 ---
 st.set_page_config(page_title="조달청 실적 분석 대시보드", layout="wide")
@@ -91,7 +93,7 @@ def load_historical_data():
         except Exception: continue
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
-# --- 4. [실시간 API] V15 파라미터 교정 & 문자열 URL 조립 ---
+# --- 4. [실시간 API] V15 찐 성공 주소 복원 ---
 def update_realtime_data():
     if 'api_df' not in st.session_state: st.session_state.api_df = pd.DataFrame()
     if 'last_update' not in st.session_state: st.session_state.last_update = "업데이트 전"
@@ -102,9 +104,11 @@ def update_realtime_data():
         return st.session_state.api_df, f"⏳ 대기 중 (다음 시도: {st.session_state.retry_time.strftime('%H:%M:%S')})"
     
     try:
-        # 인증키는 있는 그대로(수동 조립 시 인코딩 문제 회피 가능)
-        API_KEY = "c1b379f7734c7d624ddefea07510eae71b6e12c5fb89970319d76c5ae8db5248"
-        URL = "http://apis.data.go.kr/1230000/ShoppingMallPrdctInfoService05/getDlvrReqInfoList"
+        RAW_KEY = "c1b379f7734c7d624ddefea07510eae71b6e12c5fb89970319d76c5ae8db5248"
+        API_KEY = urllib.parse.unquote(RAW_KEY)
+        
+        # 💡 [핵심] '05'가 안 붙은 과거 100% 성공 주소 완벽 롤백!!
+        URL = "http://apis.data.go.kr/1230000/ShoppingMallPrdctInfoService/getDlvrReqInfoList"
         
         bgn_date = now.strftime('%Y') + '0420'
         yesterday = now - timedelta(days=1)
@@ -116,28 +120,33 @@ def update_realtime_data():
         total_count = 0
         
         while True:
-            # 💡 [핵심] V5 필수 파라미터(Dt) 적용 및 문자열 직접 조립 (requests 자동 인코딩 방지)
-            params_str = (
-                f"?serviceKey={API_KEY}"
-                f"&numOfRows=100"
-                f"&pageNo={page_no}"
-                f"&inqryDiv=1"
-                f"&inqryBgnDt={bgn_date}"
-                f"&inqryEndDt={end_date}"
-            )
-            full_url = URL + params_str
+            params = {
+                'serviceKey': API_KEY, 
+                'numOfRows': '100', 
+                'pageNo': str(page_no),
+                'inqryDiv': '1', 
+                'inqryBgnDate': bgn_date, 
+                'inqryEndDate': end_date
+            }
             
-            try:
-                # 딕셔너리(params=)를 쓰지 않고 조립된 URL을 그대로 던짐
-                res = requests.get(full_url, timeout=15)
-            except Exception as e:
-                st.session_state.retry_time = now + timedelta(minutes=5)
-                return pd.DataFrame(), f"🚨 네트워크 통신 실패: {str(e)}"
+            success = False
+            error_msg = ""
+            for attempt in range(3):
+                try:
+                    res = requests.get(URL, params=params, timeout=15)
+                    if res.status_code == 200:
+                        success = True
+                        break
+                    else:
+                        error_msg = f"HTTP {res.status_code}: {res.text[:100]}"
+                        time.sleep(1.5)
+                except Exception as e:
+                    error_msg = str(e)
+                    time.sleep(1.5)
             
-            if res.status_code != 200:
+            if not success:
                 st.session_state.retry_time = now + timedelta(minutes=5)
-                error_text = res.text[:200].replace('\n', ' ')
-                return pd.DataFrame(), f"🚨 HTTP {res.status_code} 에러: {error_text}"
+                return pd.DataFrame(), f"🚨 통신 실패 (서버오류): {error_msg}"
 
             root = ET.fromstring(res.content)
             
@@ -160,12 +169,14 @@ def update_realtime_data():
             for item in items:
                 raw_scanned_count += 1
                 
+                # 제3자단가 필터
                 cntrct_stle = item.findtext('cntrctCnclsStleNm', '')
                 if '제3자단가' not in cntrct_stle: continue
 
                 raw_corp = item.findtext('corpNm', '')
                 norm_corp = normalize_corp_name(raw_corp)
                 
+                # 스마트 타겟 매칭
                 if norm_corp in TARGET_MAP:
                     matched_corp_name = TARGET_MAP[norm_corp]
                     all_new_data.append({
@@ -188,7 +199,7 @@ def update_realtime_data():
         return pd.DataFrame(), f"🔵 전국 {total_count:,}건 스캔 완료 (타겟 실적 0건)"
         
     except Exception as e:
-        st.session_state.retry_time = now + timedelta(minutes=10)
+        st.session_state.retry_time = now + timedelta(minutes=5)
         return pd.DataFrame(), f"⚠️ 파싱 에러 발생: {str(e)}"
 
 # --- 5. 데이터 통합 실행 ---
