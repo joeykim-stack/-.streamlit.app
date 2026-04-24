@@ -92,7 +92,7 @@ def load_historical_data():
         except Exception: continue
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
-# --- 4. [실시간 API] V14 투명한 에러 출력 & 기본 통신 복구 ---
+# --- 4. [실시간 API] V14 투명한 에러 출력 & 순정 통신 ---
 def update_realtime_data():
     if 'api_df' not in st.session_state: st.session_state.api_df = pd.DataFrame()
     if 'last_update' not in st.session_state: st.session_state.last_update = "업데이트 전"
@@ -106,7 +106,6 @@ def update_realtime_data():
         RAW_KEY = "c1b379f7734c7d624ddefea07510eae71b6e12c5fb89970319d76c5ae8db5248"
         API_KEY = urllib.parse.unquote(RAW_KEY)
         
-        # 가장 기본적이고 최신인 V5 주소로 고정 (이상한 꼼수 제거)
         URL = "http://apis.data.go.kr/1230000/ShoppingMallPrdctInfoService05/getDlvrReqInfoList"
         
         bgn_date = now.strftime('%Y') + '0420'
@@ -130,24 +129,21 @@ def update_realtime_data():
                 'inqryEndDate': end_date
             }
             
-            # 수동 조립 방식 버리고 requests의 순정 인코딩 방식 사용
             try:
                 res = requests.get(URL, params=params, timeout=15)
             except Exception as e:
                 st.session_state.retry_time = now + timedelta(minutes=5)
                 return pd.DataFrame(), f"🚨 네트워크 통신 실패 (에러명: {str(e)})"
             
-            # HTTP 에러 시 원문 그대로 출력
+            # 💡 [핵심] HTTP 에러 시 뭉뚱그리지 않고 원문 그대로 화면에 출력!
             if res.status_code != 200:
                 st.session_state.retry_time = now + timedelta(minutes=5)
-                # 에러 원문을 화면에 뿌려줌
                 error_text = res.text[:200].replace('\n', ' ')
                 return pd.DataFrame(), f"🚨 HTTP {res.status_code} 에러 발생: {error_text}"
 
-            # 정상 응답 시 XML 파싱
             root = ET.fromstring(res.content)
             
-            # API 내부 에러 코드 (ex: 22, 30 등) 캐치 및 원문 출력
+            # 💡 [핵심] API 내부 에러 코드 (ex: 22, 30 등) 캐치 및 원문 출력!
             result_code = root.findtext('.//resultCode')
             if result_code and result_code not in ['00', '0']:
                 err_msg = root.findtext('.//resultMsg', '알 수 없는 메시지')
