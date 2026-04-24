@@ -39,7 +39,7 @@ TARGET_COMPANIES = [
     "비티에스 주식회사", "주식회사 인텔리빅스", "주식회사 비알인포텍"
 ]
 
-# 💡 [핵심] 영구 차단할 쓰레기 품목 리스트 (총 33개)
+# 💡 [업데이트] 영구 차단할 품목 리스트 (총 37개로 확장!)
 EXCLUDE_ITEMS = [
     "무인교통감시장치", "교통관제시스템", "구내방송장치", "마이크로폰", "마이크스탠드", 
     "무선마이크장치", "버스승강장", "보행자안전차단기", "산업제어소프트웨어", "생체인식장비", 
@@ -48,7 +48,7 @@ EXCLUDE_ITEMS = [
     "오이도장비커넥터및스테이지박스", "오디오장비커넥터및스테이지박스", "이퀄라이저", 
     "정보화교육서비스", "주차관제장치", "차량번호판독기", "출입통제시스템", "태양전지조절기", 
     "파일시스템소프트웨어", "패키지소프트웨어개발및도입서비스", "플러그용잭", "해석또는과학소프트웨어", 
-    "화재경보장치"
+    "화재경보장치", "콤팩트디스크재생또는녹음기", "리튬전지", "리셉터클", "라디오튜너"
 ]
 
 def normalize_corp_name(name):
@@ -192,7 +192,7 @@ def update_realtime_data():
         st.session_state.retry_time = now + timedelta(minutes=5)
         return pd.DataFrame(), f"⚠️ 파싱 에러: {str(e)}"
 
-# --- 5. 데이터 통합 실행 (💡 중복 제거 & 품목 필터링) ---
+# --- 5. 데이터 통합 실행 (중복 제거 & 품목 필터링) ---
 df_hist = load_historical_data()
 df_api, api_msg = update_realtime_data()
 
@@ -202,12 +202,12 @@ if not df_api.empty:
 else:
     df_total = df_hist.copy()
 
-# 💡 [강력 필터] 33개 쓸데없는 품목 원천 차단!
+# 💡 [강력 필터] 37개 쓸데없는 품목 원천 차단!
 if not df_total.empty and '물품분류명' in df_total.columns:
     pattern = '|'.join(EXCLUDE_ITEMS)
     df_total = df_total[~df_total['물품분류명'].astype(str).str.contains(pattern, na=False, regex=True)]
 
-st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v17.2</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v17.3</div>", unsafe_allow_html=True)
 st.markdown(f"<div class='update-time'>🕒 마지막 업데이트(KST): {st.session_state.last_update} | 상태: {api_msg}</div>", unsafe_allow_html=True)
 
 # --- 6. 사이드바 필터 ---
