@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 import plotly.express as px
 import plotly.graph_objects as go
 from io import BytesIO
-import urllib.parse
+import time  # 💡 [복구] 강철 멘탈 재시도를 위한 필수 모듈
 
 # --- 1. 기본 설정 및 KST 시계 ---
 st.set_page_config(page_title="조달청 실적 분석 대시보드", layout="wide")
@@ -104,10 +104,7 @@ def update_realtime_data():
         return st.session_state.api_df, f"⏳ 대기 중 (다음 시도 KST: {st.session_state.retry_time.strftime('%H:%M:%S')})"
     
     try:
-        RAW_KEY = "c1b379f7734c7d624ddefea07510eae71b6e12c5fb89970319d76c5ae8db5248"
-        API_KEY = urllib.parse.unquote(RAW_KEY)
-        
-        # 최신 V5 서버가 맞음 (이건 팩트)
+        API_KEY = "c1b379f7734c7d624ddefea07510eae71b6e12c5fb89970319d76c5ae8db5248"
         URL = "http://apis.data.go.kr/1230000/ShoppingMallPrdctInfoService05/getDlvrReqInfoList"
         
         all_new_data = []
@@ -115,7 +112,7 @@ def update_realtime_data():
         raw_scanned_count = 0
         total_count = 0
         
-        # 💡 [복구 1] '오늘' 날짜 요청 버그 완벽 해결! (무조건 어제까지만 검색)
+        # 💡 [복구 1] 확실하게 어제 날짜까지만 조회 (조달청 D-1 동기화 원칙)
         bgn_date = now.strftime('%Y') + '0420'
         yesterday = now - timedelta(days=1)
         end_date = yesterday.strftime('%Y%m%d')
@@ -130,54 +127,72 @@ def update_realtime_data():
                 'inqryEndDate': end_date
             }
             
-            # 💡 [복구 2] 잃어버렸던 수동 URL 조립 (인코딩 에러 원천 차단)
-            query_string = "&".join([f"{k}={v}" for k, v in params.items()])
-            full_url = f"{URL}?{query_string}"
+            # 💡 [복구 2] 강철 멘탈 Retry (Exponential Backoff) 로직 부활!
+            success = False
+            for attempt in range(5):
+                try:
+                    res = requests.get(URL, params=params, timeout=15)
+                    if res.status_code == 200:
+                        success = True
+                        break
+                    else:
+                        time.sleep(2 ** attempt) # 조달청 에러 시 1, 2, 4, 8초 대기 후 악착같이 재시도
+                except Exception:
+                    time.sleep(2 ** attempt)
+                    
+            if not success:
+                st.session_state.retry_time = now + timedelta(minutes=10)
+                return pd.DataFrame(), "🚨 5회 재시도 실패 (서버 통신 장애)"
+
+            root = ET.fromstring(res.content)
             
-            res = requests.get(full_url, timeout=15)
-            
-            if res.status_code == 200:
-                root = ET.fromstring(res.content)
-                
-                result_code = root.findtext('.//resultCode')
-                if result_code and result_code != '00':
+            # 💡 [복구 3] 파라미터 이름 꼼수 방어 (Date -> Dt 자동 폴백)
+            result_code = root.findtext('.//resultCode')
+            if result_code and result_code != '00':
+                if result_code in ['22', '30', '99']: 
+                    params['inqryBgnDt'] = params.pop('inqryBgnDate')
+                    params['inqryEndDt'] = params.pop('inqryEndDate')
+                    res = requests.get(URL, params=params, timeout=15)
+                    root = ET.fromstring(res.content)
+                else:
                     err_msg = root.findtext('.//resultMsg', '알 수 없는 조달청 오류')
-                    st.session_state.retry_time = now + timedelta(minutes=30)
                     return pd.DataFrame(), f"🚨 API 거부됨: {err_msg} ({result_code})"
 
-                total_count_str = root.findtext('.//totalCount')
-                if total_count_str:
-                    total_count = int(total_count_str)
+            total_count_str = root.findtext('.//totalCount')
+            if total_count_str:
+                total_count = int(total_count_str)
 
-                items = root.findall('.//item')
-                if not items: break
-                
-                for item in items:
-                    raw_scanned_count += 1
-                    
-                    # 💡 [복구 3] 잃어버렸던 나의 필살기 ('제3자단가' 진성 실적 추출)
-                    cntrct_stle = item.findtext('cntrctCnclsStleNm', '')
-                    if '제3자단가' not in cntrct_stle:
-                        continue
-
-                    raw_corp = item.findtext('corpNm', '')
-                    norm_corp = normalize_corp_name(raw_corp)
-                    
-                    if norm_corp in TARGET_MAP:
-                        matched_corp_name = TARGET_MAP[norm_corp]
-                        all_new_data.append({
-                            '업체명': matched_corp_name, 
-                            '물품분류명': item.findtext('prdctClsfcNm', ''), 
-                            '금액': float(item.findtext('dlvrReqAmt', 0)), 
-                            '납품요구번호': item.findtext('dlvrReqNo', f'API_{now.timestamp()}'), 
-                            '월': '4월',
-                            'MAS여부': item.findtext('masYn', 'Y').strip().upper() 
-                        })
-                
-                if page_no * 100 >= total_count: break
-                page_no += 1
-            else: 
+            # 진짜 0건이면 탈출
+            if total_count == 0:
                 break
+
+            items = root.findall('.//item')
+            if not items: break
+            
+            for item in items:
+                raw_scanned_count += 1
+                
+                # 💡 [복구 4] 잃어버렸던 나의 필살기 ('제3자단가' 진성 실적 추출)
+                cntrct_stle = item.findtext('cntrctCnclsStleNm', '')
+                if '제3자단가' not in cntrct_stle:
+                    continue
+
+                raw_corp = item.findtext('corpNm', '')
+                norm_corp = normalize_corp_name(raw_corp)
+                
+                if norm_corp in TARGET_MAP:
+                    matched_corp_name = TARGET_MAP[norm_corp]
+                    all_new_data.append({
+                        '업체명': matched_corp_name, 
+                        '물품분류명': item.findtext('prdctClsfcNm', ''), 
+                        '금액': float(item.findtext('dlvrReqAmt', 0)), 
+                        '납품요구번호': item.findtext('dlvrReqNo', f'API_{now.timestamp()}'), 
+                        '월': '4월',
+                        'MAS여부': item.findtext('masYn', 'Y').strip().upper() 
+                    })
+            
+            if page_no * 100 >= total_count: break
+            page_no += 1
 
         st.session_state.last_update = now.strftime('%H:%M:%S')
         if all_new_data:
