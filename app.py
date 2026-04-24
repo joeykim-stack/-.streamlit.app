@@ -93,7 +93,7 @@ def load_historical_data():
         except Exception: continue
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
-# --- 4. [실시간 API] V15 찐 성공 주소 복원 ---
+# --- 4. [실시간 API] 500 에러 원천 차단 (넓은 범위 조회) ---
 def update_realtime_data():
     if 'api_df' not in st.session_state: st.session_state.api_df = pd.DataFrame()
     if 'last_update' not in st.session_state: st.session_state.last_update = "업데이트 전"
@@ -101,22 +101,20 @@ def update_realtime_data():
     
     now = get_now_kst()
     if st.session_state.retry_time and now < st.session_state.retry_time:
-        return st.session_state.api_df, f"⏳ 대기 중 (다음 시도: {st.session_state.retry_time.strftime('%H:%M:%S')})"
+        return st.session_state.api_df, f"⏳ 대기 중 (다음 시도 KST: {st.session_state.retry_time.strftime('%H:%M:%S')})"
     
     try:
         RAW_KEY = "c1b379f7734c7d624ddefea07510eae71b6e12c5fb89970319d76c5ae8db5248"
         API_KEY = urllib.parse.unquote(RAW_KEY)
         
-        # 💡 [핵심] '05'가 안 붙은 과거 100% 성공 주소 완벽 롤백!!
-        URL = "http://apis.data.go.kr/1230000/ShoppingMallPrdctInfoService/getDlvrReqInfoList"
+        URL = "http://apis.data.go.kr/1230000/ShoppingMallPrdctInfoService05/getDlvrReqInfoList"
         
-        bgn_date = now.strftime('%Y') + '0420'
-        yesterday = now - timedelta(days=1)
-        end_date = yesterday.strftime('%Y%m%d')
+        # 💡 [핵심] 에러 안 나게 무조건 데이터가 있는 '해당 월 1일'부터 '오늘'까지 넉넉하게 긁음!
+        bgn_date = now.strftime('%Y%m') + '01' 
+        end_date = now.strftime('%Y%m%d')
         
         all_new_data = []
         page_no = 1
-        raw_scanned_count = 0
         total_count = 0
         
         while True:
@@ -129,24 +127,21 @@ def update_realtime_data():
                 'inqryEndDate': end_date
             }
             
+            # 강철 멘탈 재시도 부활
             success = False
-            error_msg = ""
             for attempt in range(3):
                 try:
                     res = requests.get(URL, params=params, timeout=15)
                     if res.status_code == 200:
                         success = True
                         break
-                    else:
-                        error_msg = f"HTTP {res.status_code}: {res.text[:100]}"
-                        time.sleep(1.5)
-                except Exception as e:
-                    error_msg = str(e)
-                    time.sleep(1.5)
+                    time.sleep(2)
+                except Exception:
+                    time.sleep(2)
             
             if not success:
                 st.session_state.retry_time = now + timedelta(minutes=5)
-                return pd.DataFrame(), f"🚨 통신 실패 (서버오류): {error_msg}"
+                return pd.DataFrame(), f"🚨 HTTP {res.status_code} 통신 실패"
 
             root = ET.fromstring(res.content)
             
@@ -154,29 +149,24 @@ def update_realtime_data():
             if result_code and result_code not in ['00', '0']:
                 err_msg = root.findtext('.//resultMsg', '알 수 없는 메시지')
                 st.session_state.retry_time = now + timedelta(minutes=5)
-                return pd.DataFrame(), f"🚨 조달청 API 응답 거부: [{result_code}] {err_msg}"
+                return pd.DataFrame(), f"🚨 조달청 거부: [{result_code}] {err_msg}"
 
             total_count_str = root.findtext('.//totalCount')
             if total_count_str:
                 total_count = int(total_count_str)
 
-            if total_count == 0:
-                break
+            if total_count == 0: break
 
             items = root.findall('.//item')
             if not items: break
             
             for item in items:
-                raw_scanned_count += 1
-                
-                # 제3자단가 필터
                 cntrct_stle = item.findtext('cntrctCnclsStleNm', '')
                 if '제3자단가' not in cntrct_stle: continue
 
                 raw_corp = item.findtext('corpNm', '')
                 norm_corp = normalize_corp_name(raw_corp)
                 
-                # 스마트 타겟 매칭
                 if norm_corp in TARGET_MAP:
                     matched_corp_name = TARGET_MAP[norm_corp]
                     all_new_data.append({
@@ -194,23 +184,29 @@ def update_realtime_data():
         st.session_state.last_update = now.strftime('%H:%M:%S')
         if all_new_data:
             st.session_state.api_df = pd.DataFrame(all_new_data)
-            return st.session_state.api_df, f"🟢 전국 {total_count:,}건 스캔 -> 세오 등 타겟 {len(all_new_data)}건 수집 완료!"
+            return st.session_state.api_df, f"🟢 이달 전체 스캔 완료 -> 타겟 {len(all_new_data)}건 수집!"
         
-        return pd.DataFrame(), f"🔵 전국 {total_count:,}건 스캔 완료 (타겟 실적 0건)"
+        return pd.DataFrame(), f"🔵 스캔 완료 (타겟 실적 0건)"
         
     except Exception as e:
-        st.session_state.retry_time = now + timedelta(minutes=5)
-        return pd.DataFrame(), f"⚠️ 파싱 에러 발생: {str(e)}"
+        st.session_state.retry_time = now + timedelta(minutes=10)
+        return pd.DataFrame(), f"⚠️ 파싱 에러: {str(e)}"
 
-# --- 5. 데이터 통합 실행 ---
+# --- 5. 데이터 통합 실행 (💡 스마트 중복 제거 로직) ---
 df_hist = load_historical_data()
 df_api, api_msg = update_realtime_data()
-df_total = pd.concat([df_hist, df_api], ignore_index=True) if not df_api.empty else df_hist.copy()
+
+# 💡 여기서 엑셀 데이터(19일까지)와 API 데이터(1일부터)를 합친 뒤, 납품요구번호 겹치는 건 싹 다 날려버림!
+if not df_api.empty:
+    df_total = pd.concat([df_hist, df_api], ignore_index=True)
+    df_total = df_total.drop_duplicates(subset=['납품요구번호'], keep='first')
+else:
+    df_total = df_hist.copy()
 
 if not df_total.empty and '물품분류명' in df_total.columns:
     df_total = df_total[~df_total['물품분류명'].astype(str).str.contains('무인교통감시장치', na=False)]
 
-st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v15.0</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v16.0</div>", unsafe_allow_html=True)
 st.markdown(f"<div class='update-time'>🕒 마지막 업데이트(KST): {st.session_state.last_update} | 상태: {api_msg}</div>", unsafe_allow_html=True)
 
 # --- 6. 사이드바 필터 ---
