@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import plotly.express as px
 import plotly.graph_objects as go
 from io import BytesIO
+import urllib.parse
 
 # --- 1. 기본 설정 및 KST 시계 ---
 st.set_page_config(page_title="조달청 실적 분석 대시보드", layout="wide")
@@ -92,7 +93,7 @@ def load_historical_data():
         except Exception: continue
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
-# --- 4. [실시간 API] V5 찐 최종 병기 엔진 ---
+# --- 4. [실시간 API] 과거의 지혜 완벽 복원 엔진 ---
 def update_realtime_data():
     if 'api_df' not in st.session_state: st.session_state.api_df = pd.DataFrame()
     if 'last_update' not in st.session_state: st.session_state.last_update = "업데이트 전"
@@ -103,8 +104,10 @@ def update_realtime_data():
         return st.session_state.api_df, f"⏳ 대기 중 (다음 시도 KST: {st.session_state.retry_time.strftime('%H:%M:%S')})"
     
     try:
-        API_KEY = "c1b379f7734c7d624ddefea07510eae71b6e12c5fb89970319d76c5ae8db5248"
-        # 💡 [핵심 1] V5 최신 살아있는 서버 사용
+        RAW_KEY = "c1b379f7734c7d624ddefea07510eae71b6e12c5fb89970319d76c5ae8db5248"
+        API_KEY = urllib.parse.unquote(RAW_KEY)
+        
+        # 최신 V5 서버가 맞음 (이건 팩트)
         URL = "http://apis.data.go.kr/1230000/ShoppingMallPrdctInfoService05/getDlvrReqInfoList"
         
         all_new_data = []
@@ -112,23 +115,26 @@ def update_realtime_data():
         raw_scanned_count = 0
         total_count = 0
         
+        # 💡 [복구 1] '오늘' 날짜 요청 버그 완벽 해결! (무조건 어제까지만 검색)
         bgn_date = now.strftime('%Y') + '0420'
-        end_date = now.strftime('%Y%m%d')
+        yesterday = now - timedelta(days=1)
+        end_date = yesterday.strftime('%Y%m%d')
         
         while True:
-            # 💡 [핵심 2] V5 서버의 비밀 병기 파라미터 (Dt) 장착! 구형(Date)도 보험으로 같이 전송
             params = {
                 'serviceKey': API_KEY, 
                 'numOfRows': '100', 
                 'pageNo': str(page_no),
                 'inqryDiv': '1', 
-                'inqryBgnDt': bgn_date,   # V5 신형 파라미터
-                'inqryEndDt': end_date,   # V5 신형 파라미터
-                'inqryBgnDate': bgn_date, # 구형 파라미터 (보험)
-                'inqryEndDate': end_date  # 구형 파라미터 (보험)
+                'inqryBgnDate': bgn_date, 
+                'inqryEndDate': end_date
             }
             
-            res = requests.get(URL, params=params, timeout=15)
+            # 💡 [복구 2] 잃어버렸던 수동 URL 조립 (인코딩 에러 원천 차단)
+            query_string = "&".join([f"{k}={v}" for k, v in params.items()])
+            full_url = f"{URL}?{query_string}"
+            
+            res = requests.get(full_url, timeout=15)
             
             if res.status_code == 200:
                 root = ET.fromstring(res.content)
@@ -148,6 +154,12 @@ def update_realtime_data():
                 
                 for item in items:
                     raw_scanned_count += 1
+                    
+                    # 💡 [복구 3] 잃어버렸던 나의 필살기 ('제3자단가' 진성 실적 추출)
+                    cntrct_stle = item.findtext('cntrctCnclsStleNm', '')
+                    if '제3자단가' not in cntrct_stle:
+                        continue
+
                     raw_corp = item.findtext('corpNm', '')
                     norm_corp = normalize_corp_name(raw_corp)
                     
@@ -170,7 +182,7 @@ def update_realtime_data():
         st.session_state.last_update = now.strftime('%H:%M:%S')
         if all_new_data:
             st.session_state.api_df = pd.DataFrame(all_new_data)
-            return st.session_state.api_df, f"🟢 전국 {total_count:,}건 스캔 완료 -> 세오 등 타겟 {len(all_new_data)}건 수집 성공!"
+            return st.session_state.api_df, f"🟢 전국 {total_count:,}건 스캔 -> 타겟 {len(all_new_data)}건(세오 포함) 수집 성공!"
         
         return pd.DataFrame(), f"🔵 전국 {total_count:,}건 스캔 완료 (타겟 실적 0건)"
         
@@ -186,7 +198,7 @@ df_total = pd.concat([df_hist, df_api], ignore_index=True) if not df_api.empty e
 if not df_total.empty and '물품분류명' in df_total.columns:
     df_total = df_total[~df_total['물품분류명'].astype(str).str.contains('무인교통감시장치', na=False)]
 
-st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v11.0</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v12.0</div>", unsafe_allow_html=True)
 st.markdown(f"<div class='update-time'>🕒 마지막 업데이트(KST): {st.session_state.last_update} | 상태: {api_msg}</div>", unsafe_allow_html=True)
 
 # --- 6. 사이드바 필터 ---
