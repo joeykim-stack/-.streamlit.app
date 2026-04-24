@@ -6,7 +6,6 @@ from datetime import datetime, timedelta
 import plotly.express as px
 import plotly.graph_objects as go
 from io import BytesIO
-import urllib.parse
 
 # --- 1. 기본 설정 및 KST 시계 ---
 st.set_page_config(page_title="조달청 실적 분석 대시보드", layout="wide")
@@ -92,7 +91,7 @@ def load_historical_data():
         except Exception: continue
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
-# --- 4. [실시간 API] V14 투명한 에러 출력 & 순정 통신 ---
+# --- 4. [실시간 API] V15 파라미터 교정 & 문자열 URL 조립 ---
 def update_realtime_data():
     if 'api_df' not in st.session_state: st.session_state.api_df = pd.DataFrame()
     if 'last_update' not in st.session_state: st.session_state.last_update = "업데이트 전"
@@ -103,13 +102,11 @@ def update_realtime_data():
         return st.session_state.api_df, f"⏳ 대기 중 (다음 시도: {st.session_state.retry_time.strftime('%H:%M:%S')})"
     
     try:
-        RAW_KEY = "c1b379f7734c7d624ddefea07510eae71b6e12c5fb89970319d76c5ae8db5248"
-        API_KEY = urllib.parse.unquote(RAW_KEY)
-        
+        # 인증키는 있는 그대로(수동 조립 시 인코딩 문제 회피 가능)
+        API_KEY = "c1b379f7734c7d624ddefea07510eae71b6e12c5fb89970319d76c5ae8db5248"
         URL = "http://apis.data.go.kr/1230000/ShoppingMallPrdctInfoService05/getDlvrReqInfoList"
         
         bgn_date = now.strftime('%Y') + '0420'
-        # D-1 원칙 준수 (어제까지만 조회)
         yesterday = now - timedelta(days=1)
         end_date = yesterday.strftime('%Y%m%d')
         
@@ -119,31 +116,31 @@ def update_realtime_data():
         total_count = 0
         
         while True:
-            # 순정 파라미터 사용 (매뉴얼 기준)
-            params = {
-                'serviceKey': API_KEY, 
-                'numOfRows': '100', 
-                'pageNo': str(page_no),
-                'inqryDiv': '1', 
-                'inqryBgnDate': bgn_date, 
-                'inqryEndDate': end_date
-            }
+            # 💡 [핵심] V5 필수 파라미터(Dt) 적용 및 문자열 직접 조립 (requests 자동 인코딩 방지)
+            params_str = (
+                f"?serviceKey={API_KEY}"
+                f"&numOfRows=100"
+                f"&pageNo={page_no}"
+                f"&inqryDiv=1"
+                f"&inqryBgnDt={bgn_date}"
+                f"&inqryEndDt={end_date}"
+            )
+            full_url = URL + params_str
             
             try:
-                res = requests.get(URL, params=params, timeout=15)
+                # 딕셔너리(params=)를 쓰지 않고 조립된 URL을 그대로 던짐
+                res = requests.get(full_url, timeout=15)
             except Exception as e:
                 st.session_state.retry_time = now + timedelta(minutes=5)
-                return pd.DataFrame(), f"🚨 네트워크 통신 실패 (에러명: {str(e)})"
+                return pd.DataFrame(), f"🚨 네트워크 통신 실패: {str(e)}"
             
-            # 💡 [핵심] HTTP 에러 시 뭉뚱그리지 않고 원문 그대로 화면에 출력!
             if res.status_code != 200:
                 st.session_state.retry_time = now + timedelta(minutes=5)
                 error_text = res.text[:200].replace('\n', ' ')
-                return pd.DataFrame(), f"🚨 HTTP {res.status_code} 에러 발생: {error_text}"
+                return pd.DataFrame(), f"🚨 HTTP {res.status_code} 에러: {error_text}"
 
             root = ET.fromstring(res.content)
             
-            # 💡 [핵심] API 내부 에러 코드 (ex: 22, 30 등) 캐치 및 원문 출력!
             result_code = root.findtext('.//resultCode')
             if result_code and result_code not in ['00', '0']:
                 err_msg = root.findtext('.//resultMsg', '알 수 없는 메시지')
@@ -163,14 +160,12 @@ def update_realtime_data():
             for item in items:
                 raw_scanned_count += 1
                 
-                # 제3자단가 필터 (유지)
                 cntrct_stle = item.findtext('cntrctCnclsStleNm', '')
                 if '제3자단가' not in cntrct_stle: continue
 
                 raw_corp = item.findtext('corpNm', '')
                 norm_corp = normalize_corp_name(raw_corp)
                 
-                # 스마트 타겟 필터 (유지)
                 if norm_corp in TARGET_MAP:
                     matched_corp_name = TARGET_MAP[norm_corp]
                     all_new_data.append({
@@ -188,13 +183,13 @@ def update_realtime_data():
         st.session_state.last_update = now.strftime('%H:%M:%S')
         if all_new_data:
             st.session_state.api_df = pd.DataFrame(all_new_data)
-            return st.session_state.api_df, f"🟢 전국 {total_count:,}건 스캔 -> 타겟 {len(all_new_data)}건 수집 완료!"
+            return st.session_state.api_df, f"🟢 전국 {total_count:,}건 스캔 -> 세오 등 타겟 {len(all_new_data)}건 수집 완료!"
         
         return pd.DataFrame(), f"🔵 전국 {total_count:,}건 스캔 완료 (타겟 실적 0건)"
         
     except Exception as e:
         st.session_state.retry_time = now + timedelta(minutes=10)
-        return pd.DataFrame(), f"⚠️ 치명적 에러 발생: {str(e)}"
+        return pd.DataFrame(), f"⚠️ 파싱 에러 발생: {str(e)}"
 
 # --- 5. 데이터 통합 실행 ---
 df_hist = load_historical_data()
@@ -204,7 +199,7 @@ df_total = pd.concat([df_hist, df_api], ignore_index=True) if not df_api.empty e
 if not df_total.empty and '물품분류명' in df_total.columns:
     df_total = df_total[~df_total['물품분류명'].astype(str).str.contains('무인교통감시장치', na=False)]
 
-st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v14.0</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v15.0</div>", unsafe_allow_html=True)
 st.markdown(f"<div class='update-time'>🕒 마지막 업데이트(KST): {st.session_state.last_update} | 상태: {api_msg}</div>", unsafe_allow_html=True)
 
 # --- 6. 사이드바 필터 ---
