@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import plotly.express as px
 import plotly.graph_objects as go
 from io import BytesIO
+import urllib.parse
 
 # --- 1. 기본 설정 및 KST 시계 ---
 st.set_page_config(page_title="조달청 실적 분석 대시보드", layout="wide")
@@ -92,7 +93,7 @@ def load_historical_data():
         except Exception: continue
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
-# --- 4. [실시간 API] V5 순정 엔진 롤백 ---
+# --- 4. [실시간 API] 연도 버그 완벽 패치 엔진 ---
 def update_realtime_data():
     if 'api_df' not in st.session_state: st.session_state.api_df = pd.DataFrame()
     if 'last_update' not in st.session_state: st.session_state.last_update = "업데이트 전"
@@ -100,11 +101,11 @@ def update_realtime_data():
     
     now = get_now_kst()
     if st.session_state.retry_time and now < st.session_state.retry_time:
-        return st.session_state.api_df, f"⏳ 대기 중 (다음 시도 KST: {st.session_state.retry_time.strftime('%H:%M:%S')})"
+        return st.session_state.api_df, f"⏳ 대기 중 (다음 시도: {st.session_state.retry_time.strftime('%H:%M:%S')})"
     
     try:
-        API_KEY = "c1b379f7734c7d624ddefea07510eae71b6e12c5fb89970319d76c5ae8db5248"
-        # 💡 [핵심] V5 최신 서버로 다시 복구
+        RAW_KEY = "c1b379f7734c7d624ddefea07510eae71b6e12c5fb89970319d76c5ae8db5248"
+        API_KEY = urllib.parse.unquote(RAW_KEY)
         URL = "http://apis.data.go.kr/1230000/ShoppingMallPrdctInfoService05/getDlvrReqInfoList"
         
         all_new_data = []
@@ -112,30 +113,35 @@ def update_realtime_data():
         raw_scanned_count = 0
         total_count = 0
         
+        # 💡 [핵심] 컴퓨터 현재 연도를 가져와서 조립! (타임머신 버그 원천차단)
+        bgn_date = now.strftime('%Y') + '0420'
+        end_date = now.strftime('%Y%m%d')
+        
         while True:
-            # 💡 [핵심] 이상한 가짜 파라미터 싹 지우고 매뉴얼 100% 순정 상태로 전송
             params = {
                 'serviceKey': API_KEY, 
-                'numOfRows': '999', 
+                'numOfRows': '100', 
                 'pageNo': str(page_no),
                 'inqryDiv': '1', 
-                'inqryBgnDate': '20260420', 
-                'inqryEndDate': now.strftime('%Y%m%d')
+                'inqryBgnDate': bgn_date, 
+                'inqryEndDate': end_date
             }
             
-            res = requests.get(URL, params=params, timeout=15)
+            # 파이썬 url_encode 버그 방어용 수동 조립
+            query_string = "&".join([f"{k}={v}" for k, v in params.items()])
+            full_url = f"{URL}?{query_string}"
+            
+            res = requests.get(full_url, timeout=15)
             
             if res.status_code == 200:
                 root = ET.fromstring(res.content)
                 
-                # API 에러 코드 캐치
                 result_code = root.findtext('.//resultCode')
                 if result_code and result_code != '00':
                     err_msg = root.findtext('.//resultMsg', '알 수 없는 오류')
                     st.session_state.retry_time = now + timedelta(minutes=30)
                     return pd.DataFrame(), f"🚨 API 거부: {err_msg} ({result_code})"
 
-                # 전체 데이터 개수 추출
                 total_count_str = root.findtext('.//totalCount')
                 if total_count_str:
                     total_count = int(total_count_str)
@@ -159,7 +165,7 @@ def update_realtime_data():
                             'MAS여부': item.findtext('masYn', 'Y').strip().upper() 
                         })
                 
-                if page_no * 999 >= total_count: break
+                if page_no * 100 >= total_count: break
                 page_no += 1
             else: 
                 break
@@ -167,9 +173,9 @@ def update_realtime_data():
         st.session_state.last_update = now.strftime('%H:%M:%S')
         if all_new_data:
             st.session_state.api_df = pd.DataFrame(all_new_data)
-            return st.session_state.api_df, f"🟢 전국 {total_count:,}건 스캔 완료 -> 타겟 {len(all_new_data)}건 수집!"
+            return st.session_state.api_df, f"🟢 전국 {total_count:,}건 중 타겟 {len(all_new_data)}건 수집!"
         
-        return pd.DataFrame(), f"🔵 전국 {total_count:,}건 스캔했으나 타겟 실적 없음."
+        return pd.DataFrame(), f"🔵 전국 {total_count:,}건 스캔 완료 (타겟 실적 0건)"
         
     except Exception as e:
         st.session_state.retry_time = now + timedelta(minutes=30)
@@ -183,7 +189,7 @@ df_total = pd.concat([df_hist, df_api], ignore_index=True) if not df_api.empty e
 if not df_total.empty and '물품분류명' in df_total.columns:
     df_total = df_total[~df_total['물품분류명'].astype(str).str.contains('무인교통감시장치', na=False)]
 
-st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v9.9</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v10.0</div>", unsafe_allow_html=True)
 st.markdown(f"<div class='update-time'>🕒 마지막 업데이트(KST): {st.session_state.last_update} | 상태: {api_msg}</div>", unsafe_allow_html=True)
 
 # --- 6. 사이드바 필터 ---
@@ -317,4 +323,4 @@ else:
             final.to_excel(wr, index=False, sheet_name='실적랭킹')
         st.download_button("💾 엑셀 보고서 다운로드", xlsx.getvalue(), f'조달업체랭킹_{get_now_kst().strftime("%Y%m%d")}.xlsx')
 
-st.markdown("<br><center style='color:gray;'>Copyright(C) 2026 Joey Kim. Data from Public Data Portal.</center>", unsafe_allow_html=True)
+st.markdown("<br><center style='color:gray;'>Copyright(C) 2024 Joey Kim. Data from Public Data Portal.</center>", unsafe_allow_html=True)
