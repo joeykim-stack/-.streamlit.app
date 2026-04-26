@@ -172,7 +172,7 @@ def update_realtime_data():
                         '업체명': matched_corp_name, 
                         '물품분류명': item.findtext('prdctClsfcNm', ''), 
                         '금액': float(item.findtext('dlvrReqAmt', 0)), 
-                        '납품요구번호': item.findtext('dlvrReqNo', f'API_{now.timestamp()}'), 
+                        '납품요구번호': item.findtext('dlvrReqNo', f'API_{time.time()}'), 
                         '월': '4월',
                         'MAS여부': item.findtext('masYn', 'Y').strip().upper() 
                     })
@@ -191,23 +191,34 @@ def update_realtime_data():
         st.session_state.retry_time = now + timedelta(minutes=5)
         return pd.DataFrame(), f"⚠️ 파싱 에러: {str(e)}"
 
-# --- 5. 데이터 통합 실행 ---
+# --- 5. 데이터 통합 실행 (💡 완벽한 중복 제거 로직) ---
 df_hist = load_historical_data()
 df_api, api_msg = update_realtime_data()
 
+# 💡 [핵심 해결] 숫자와 문자의 타입 불일치 방지를 위해 모두 깔끔한 문자열로 통일!
+if not df_hist.empty:
+    df_hist['납품요구번호'] = df_hist['납품요구번호'].astype(str).str.strip()
+
 if not df_api.empty:
-    df_total = pd.concat([df_hist, df_api], ignore_index=True)
-    # 💡 [핵심 수정] 주문번호 하나에 여러 품목이 있을 수 있으므로, 번호+품명+금액이 완벽히 똑같은 것만 엑셀-API 중복으로 판단해서 제거!
-    df_total = df_total.drop_duplicates(subset=['납품요구번호', '물품분류명', '금액'], keep='last')
+    df_api['납품요구번호'] = df_api['납품요구번호'].astype(str).str.strip()
+    
+    # API에서 긁어온 4월 '주문번호 리스트' 추출
+    api_req_nos = df_api['납품요구번호'].unique()
+    
+    # 과거 엑셀 데이터(df_hist)에서 API 번호와 겹치는 주문은 통째로 삭제! (상세 품목 훼손 방지)
+    df_hist_clean = df_hist[~df_hist['납품요구번호'].isin(api_req_nos)]
+    
+    # 겹치는 엑셀 데이터를 날린 후, 깔끔하게 API 데이터와 병합
+    df_total = pd.concat([df_hist_clean, df_api], ignore_index=True)
 else:
     df_total = df_hist.copy()
 
-# 💡 [강력 필터] 37개 쓸데없는 품목 원천 차단!
+# 💡 [강력 필터] 37개 쓸데없는 품목 원천 차단
 if not df_total.empty and '물품분류명' in df_total.columns:
     pattern = '|'.join(EXCLUDE_ITEMS)
     df_total = df_total[~df_total['물품분류명'].astype(str).str.contains(pattern, na=False, regex=True)]
 
-st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v18.0</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v18.1</div>", unsafe_allow_html=True)
 st.markdown(f"<div class='update-time'>🕒 마지막 업데이트(KST): {st.session_state.last_update} | 상태: {api_msg}</div>", unsafe_allow_html=True)
 
 # --- 6. 사이드바 필터 ---
@@ -279,6 +290,7 @@ else:
 
     st.markdown("---")
 
+    # 💡 랭킹 보드 생성 전용 함수
     def render_ranking_board(df_data, title, show_count_col, sort_key, dl_key, cmap_color='Blues'):
         st.subheader(title)
         
