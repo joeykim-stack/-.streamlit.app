@@ -103,7 +103,7 @@ def load_historical_data():
         except Exception: continue
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
-# --- 4. [실시간 API] ---
+# --- 4. [실시간 API] 💡 철벽 방어 및 스마트 분리 ---
 def update_realtime_data():
     if 'api_df' not in st.session_state: st.session_state.api_df = pd.DataFrame()
     if 'last_update' not in st.session_state: st.session_state.last_update = "업데이트 전"
@@ -114,15 +114,22 @@ def update_realtime_data():
         return st.session_state.api_df, f"⏳ 대기 중 (다음 시도: {st.session_state.retry_time.strftime('%H:%M:%S')})"
     
     try:
-        API_KEY = "c1b379f7734c7d624ddefea07510eae71b6e12c5fb89970319d76c5ae8db5248"
+        import urllib.parse
+        RAW_KEY = "c1b379f7734c7d624ddefea07510eae71b6e12c5fb89970319d76c5ae8db5248"
+        API_KEY = urllib.parse.unquote(RAW_KEY)
         URL = "http://apis.data.go.kr/1230000/at/ShoppingMallPrdctInfoService/getDlvrReqInfoList"
         
         bgn_date = now.strftime('%Y%m') + '01'
         end_date = now.strftime('%Y%m%d')
         
+        # 💡 [핵심] API에서 긁어온 데이터 중, 이 날짜 이전의 데이터는 무조건 버린다!
+        # (로컬 CSV가 19일까지 있으므로 API는 20일 데이터부터만 수집)
+        cutoff_date = now.strftime('%Y%m') + '20'
+        
         all_new_data = []
         page_no = 1
         total_count = 0
+        added_count = 0 # 20일 이후로 실제로 담긴 건수
         
         while True:
             params = {
@@ -163,6 +170,19 @@ def update_realtime_data():
             if not items: break
             
             for item in items:
+                # 💡 [핵심] 날짜 철벽 필터링 (20일 이전이면 가차 없이 스킵)
+                rcpt_date = item.findtext('dlvrReqRcptDate', '')
+                if not rcpt_date:
+                    rcpt_date = item.findtext('dlvrReqDate', '') # 보험용
+                
+                rcpt_date_clean = rcpt_date.replace('-', '').replace('.', '').strip()[:8]
+                
+                if rcpt_date_clean and rcpt_date_clean < cutoff_date:
+                    continue # 1일~19일 데이터는 버림! (로컬 CSV가 처리함)
+                
+                cntrct_stle = item.findtext('cntrctCnclsStleNm', '')
+                if '제3자단가' not in cntrct_stle: continue
+
                 raw_corp = item.findtext('corpNm', '')
                 norm_corp = normalize_corp_name(raw_corp)
                 
@@ -176,6 +196,7 @@ def update_realtime_data():
                         '월': '4월',
                         'MAS여부': item.findtext('masYn', 'Y').strip().upper() 
                     })
+                    added_count += 1
             
             if page_no * 999 >= total_count: break
             page_no += 1
@@ -183,33 +204,21 @@ def update_realtime_data():
         st.session_state.last_update = now.strftime('%H:%M:%S')
         if all_new_data:
             st.session_state.api_df = pd.DataFrame(all_new_data)
-            return st.session_state.api_df, f"🟢 4월 전체 {total_count:,}건 스캔 -> 타겟 {len(all_new_data)}건 수집!"
+            return st.session_state.api_df, f"🟢 4월 스캔 완료 -> 20일 이후 실적 {added_count}건 수집!"
         
-        return pd.DataFrame(), f"🔵 4월 전체 {total_count:,}건 스캔 완료 (타겟 0건)"
+        return pd.DataFrame(), f"🔵 4월 스캔 완료 (20일 이후 타겟 실적 없음)"
         
     except Exception as e:
         st.session_state.retry_time = now + timedelta(minutes=5)
         return pd.DataFrame(), f"⚠️ 파싱 에러: {str(e)}"
 
-# --- 5. 데이터 통합 실행 (💡 완벽한 중복 제거 로직) ---
+# --- 5. 데이터 통합 실행 (퍼즐 맞추기) ---
 df_hist = load_historical_data()
 df_api, api_msg = update_realtime_data()
 
-# 💡 [핵심 해결] 숫자와 문자의 타입 불일치 방지를 위해 모두 깔끔한 문자열로 통일!
-if not df_hist.empty:
-    df_hist['납품요구번호'] = df_hist['납품요구번호'].astype(str).str.strip()
-
+# df_hist(1~19일) + df_api(20일 이후) = 완벽한 퍼즐 (중복 없음!)
 if not df_api.empty:
-    df_api['납품요구번호'] = df_api['납품요구번호'].astype(str).str.strip()
-    
-    # API에서 긁어온 4월 '주문번호 리스트' 추출
-    api_req_nos = df_api['납품요구번호'].unique()
-    
-    # 과거 엑셀 데이터(df_hist)에서 API 번호와 겹치는 주문은 통째로 삭제! (상세 품목 훼손 방지)
-    df_hist_clean = df_hist[~df_hist['납품요구번호'].isin(api_req_nos)]
-    
-    # 겹치는 엑셀 데이터를 날린 후, 깔끔하게 API 데이터와 병합
-    df_total = pd.concat([df_hist_clean, df_api], ignore_index=True)
+    df_total = pd.concat([df_hist, df_api], ignore_index=True)
 else:
     df_total = df_hist.copy()
 
@@ -218,7 +227,7 @@ if not df_total.empty and '물품분류명' in df_total.columns:
     pattern = '|'.join(EXCLUDE_ITEMS)
     df_total = df_total[~df_total['물품분류명'].astype(str).str.contains(pattern, na=False, regex=True)]
 
-st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v18.1</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v19.0</div>", unsafe_allow_html=True)
 st.markdown(f"<div class='update-time'>🕒 마지막 업데이트(KST): {st.session_state.last_update} | 상태: {api_msg}</div>", unsafe_allow_html=True)
 
 # --- 6. 사이드바 필터 ---
@@ -290,7 +299,6 @@ else:
 
     st.markdown("---")
 
-    # 💡 랭킹 보드 생성 전용 함수
     def render_ranking_board(df_data, title, show_count_col, sort_key, dl_key, cmap_color='Blues'):
         st.subheader(title)
         
