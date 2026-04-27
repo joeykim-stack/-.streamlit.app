@@ -57,10 +57,13 @@ def normalize_corp_name(name):
 
 TARGET_MAP = {normalize_corp_name(comp): comp for comp in TARGET_COMPANIES}
 
-# --- 3. [캐싱] 로컬 데이터 로드 ---
+# --- 3. [캐싱] 로컬 데이터 로드 (💡 V19 로직 완벽 복원) ---
 @st.cache_data(ttl=3600, show_spinner="로컬 데이터를 불러오는 중...")
 def load_historical_data():
-    file_month_map = {'data.csv': '1월', 'data02.csv': '2월', 'data02.cvs': '2월', 'data03.csv': '3월', 'data04.csv': '4월'}
+    file_month_map = {
+        'data.csv': '1월', 'data02.csv': '2월', 'data02.cvs': '2월', 
+        'data03.csv': '3월', 'data04.csv': '4월'
+    }
     dfs = []
     for file, target_month in file_month_map.items():
         try:
@@ -79,20 +82,12 @@ def load_historical_data():
             req_col = '납품요구번호' if '납품요구번호' in df.columns else ('주문번호' if '주문번호' in df.columns else None)
             if not req_col: continue 
 
-            # 소수점, nan 완벽 제거
-            df[req_col] = df[req_col].fillna('').astype(str).str.replace('nan', '', regex=False).str.strip().str.replace(r'\.0$', '', regex=True)
-
-            # 💡 [핵심 1] 0원 증발 버그 완벽 해결! 합계/총계는 무시하고 오직 '기본 단가(납품요구금액)' 최우선순위로 읽음
-            amt_col = None
-            for col in ['납품요구금액', '납품금액', '금액', '납품증감금액']:
-                if col in df.columns:
-                    amt_col = col
-                    break
-            
-            if amt_col:
-                df['금액'] = pd.to_numeric(df[amt_col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
-            else:
-                continue # 안전을 위해 금액 컬럼을 못 찾으면 스킵
+            # 💡 [V19 복원] 금액 파싱 순서: 납품증감금액 최우선!
+            if '납품증감금액' in df.columns: df['금액'] = pd.to_numeric(df['납품증감금액'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+            elif '합계납품증감금액' in df.columns: df['금액'] = pd.to_numeric(df['합계납품증감금액'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+            elif '납품요구금액' in df.columns: df['금액'] = pd.to_numeric(df['납품요구금액'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+            elif '금액' in df.columns: df['금액'] = pd.to_numeric(df['금액'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+            else: continue
             
             temp_df = df[['업체명', '물품분류명', '금액', req_col]].copy()
             temp_df.columns = ['업체명', '물품분류명', '금액', '납품요구번호']
@@ -109,15 +104,10 @@ def load_historical_data():
             dfs.append(temp_df)
         except Exception: continue
     
-    result_df = pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
-    
-    # 로컬 파일 간의 중복(data02.csv vs data02.cvs)만 안전하게 제거
-    if not result_df.empty:
-        result_df = result_df.drop_duplicates()
-        
-    return result_df
+    # 💡 [V19 복원] drop_duplicates 삭제!
+    return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
-# --- 4. [캐싱] 실시간 API 수집 ---
+# --- 4. [캐싱] 실시간 API 수집 (💡 V19 로직 완벽 복원) ---
 @st.cache_data(ttl=1800, show_spinner="조달청 실시간 API 스캔 중...")
 def fetch_api_data():
     now = get_now_kst()
@@ -128,8 +118,6 @@ def fetch_api_data():
         
         bgn_date = now.strftime('%Y%m') + '01'
         end_date = now.strftime('%Y%m%d')
-        
-        # 💡 [핵심 2] 날짜 파티션 벽 세우기 (API는 20일 이후만 담당)
         cutoff_date = now.strftime('%Y%m') + '20'
         
         all_new_data = []
@@ -163,21 +151,19 @@ def fetch_api_data():
             if not items: break
             
             for item in items:
-                # 안전한 날짜 체크 (요구일자를 최우선으로 검사)
-                req_date = item.findtext('dlvrReqDate', '')
+                # 💡 [V19 복원] 20일 이전 데이터 스킵
                 rcpt_date = item.findtext('dlvrReqRcptDate', '')
-                target_date = req_date if req_date else rcpt_date
+                if not rcpt_date:
+                    rcpt_date = item.findtext('dlvrReqDate', '')
                 
-                date_clean = target_date.replace('-', '').replace('.', '').strip()[:8]
+                rcpt_date_clean = rcpt_date.replace('-', '').replace('.', '').strip()[:8]
                 
-                # 20일 이전 실적은 무조건 스킵 (엑셀이 처리함)
-                if date_clean and date_clean < cutoff_date:
+                if rcpt_date_clean and rcpt_date_clean < cutoff_date:
                     continue
                 
-                # 💡 [핵심 3] 오직 MAS와 우수조달만 허용 (혁신 등 잡계약 원천 차단)
+                # 💡 [V19 복원] 순정 '제3자단가' 필터 복원
                 cntrct_stle = item.findtext('cntrctCnclsStleNm', '')
-                valid_keywords = ['제3자단가', '다수공급자', '우수', 'MAS']
-                if not any(k in cntrct_stle for k in valid_keywords):
+                if '제3자단가' not in cntrct_stle: 
                     continue
 
                 raw_corp = item.findtext('corpNm', '')
@@ -192,7 +178,7 @@ def fetch_api_data():
                         '금액': float(item.findtext('dlvrReqAmt', 0)), 
                         '납품요구번호': req_no if req_no else f'API_{time.time()}', 
                         '월': '4월',
-                        'MAS여부': 'Y' # MAS/우수 필터를 통과했으므로 무조건 Y
+                        'MAS여부': item.findtext('masYn', 'Y').strip().upper() 
                     })
                     added_count += 1
             
@@ -205,24 +191,19 @@ def fetch_api_data():
         
     except Exception: return pd.DataFrame(), f"⚠️ 파싱 에러"
 
-# --- 5. [캐싱] 데이터 통합 및 정제 (💡 삭제 버그 해결의 종착점) ---
+# --- 5. [캐싱] 데이터 통합 및 정제 (💡 V19 로직 완벽 복원) ---
 @st.cache_data(ttl=1800, show_spinner="데이터 통합 및 분석 중...")
 def get_processed_data():
     df_hist = load_historical_data()
     df_api, api_msg = fetch_api_data()
 
-    if not df_hist.empty: df_hist['납품요구번호'] = df_hist['납품요구번호'].astype(str).str.strip()
-    if not df_api.empty: df_api['납품요구번호'] = df_api['납품요구번호'].astype(str).str.strip()
-
-    # 💡 [핵심 4] 어설픈 덮어쓰기 로직 삭제! 날짜 파티션이 쳐져 있으므로 안심하고 그냥 더하기만 한다.
-    if not df_api.empty and not df_hist.empty:
+    # 💡 [V19 복원] 어설픈 덮어쓰기나 중복 제거 싹 다 삭제! 오직 순수하게 이어붙이기만!
+    if not df_api.empty:
         df_total = pd.concat([df_hist, df_api], ignore_index=True)
-    elif not df_api.empty:
-        df_total = df_api.copy()
     else:
         df_total = df_hist.copy()
 
-    # 37개 쓰레기 품목 차단 필터
+    # 💡 37개 쓰레기 품목 차단 필터
     if not df_total.empty and '물품분류명' in df_total.columns:
         pattern = '|'.join(EXCLUDE_ITEMS)
         df_total = df_total[~df_total['물품분류명'].astype(str).str.contains(pattern, na=False, regex=True)]
@@ -233,7 +214,7 @@ def get_processed_data():
 df_total, api_msg = get_processed_data()
 
 # --- 6. UI 및 새로고침 버튼 ---
-st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v27.0 (파로스/세오 순정 복원)</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v28.0 (V19 데이터 코어 복원)</div>", unsafe_allow_html=True)
 
 col_head1, col_head2 = st.columns([5, 1])
 with col_head1:
@@ -384,7 +365,7 @@ else:
         
     render_ranking_board(
         df_data=board_df_total, 
-        title="🏆 업체별 종합 실적 랭킹 (우수조달 + MAS 전체)", 
+        title="🏆 업체별 종합 실적 랭킹 (우수조달 + MAS)", 
         show_count_col=show_cnt, 
         sort_key='sort_total', 
         dl_key='dl_total', 
