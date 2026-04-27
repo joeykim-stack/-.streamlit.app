@@ -57,11 +57,9 @@ def normalize_corp_name(name):
 
 TARGET_MAP = {normalize_corp_name(comp): comp for comp in TARGET_COMPANIES}
 
-# --- 3. [캐싱 폭파] 로컬 데이터 로드 (💡 data02 중복 원천 차단 + V19 엔진) ---
-@st.cache_data(ttl=3600, show_spinner="로컬 데이터를 불러오는 중...")
-def load_historical_data_v30():
-    # 💡 2배 뻥튀기 주범인 'data02.cvs' 삭제! 오직 정상 파일만 읽음!
-    file_month_map = {'data.csv': '1월', 'data02.csv': '2월', 'data03.csv': '3월', 'data04.csv': '4월'}
+# 💣 캐시 완전 삭제 (@st.cache_data 지움!)
+def load_historical_data_raw():
+    file_month_map = {'data.csv': '1월', 'data02.csv': '2월', 'data02.cvs': '2월', 'data03.csv': '3월', 'data04.csv': '4월'}
     dfs = []
     for file, target_month in file_month_map.items():
         try:
@@ -80,10 +78,10 @@ def load_historical_data_v30():
             req_col = '납품요구번호' if '납품요구번호' in df.columns else ('주문번호' if '주문번호' in df.columns else None)
             if not req_col: continue 
 
-            # 소수점, nan 완벽 제거 (API 데이터와 완벽 매칭을 위해)
+            # 소수점, nan 완벽 제거
             df[req_col] = df[req_col].fillna('').astype(str).str.replace('nan', '', regex=False).str.replace(r'\.0$', '', regex=True).str.strip()
 
-            # 💡 [V19 순정 100% 복원] 네가 맞다고 했던 그 '납품증감금액' 최우선 추출!
+            # 💡 [V19 순정 엔진] 납품증감금액 최우선 (파로스 50억 복원용)
             if '납품증감금액' in df.columns: df['금액'] = pd.to_numeric(df['납품증감금액'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
             elif '합계납품증감금액' in df.columns: df['금액'] = pd.to_numeric(df['합계납품증감금액'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
             elif '납품요구금액' in df.columns: df['금액'] = pd.to_numeric(df['납품요구금액'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
@@ -105,11 +103,16 @@ def load_historical_data_v30():
             dfs.append(temp_df)
         except Exception: continue
     
-    return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+    result_df = pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+    
+    # 중복 파일(data02.csv / data02.cvs)만 안전하게 제거, 다중 품목 보존
+    if not result_df.empty:
+        result_df = result_df.drop_duplicates()
+        
+    return result_df
 
-# --- 4. [캐싱 폭파] 실시간 API 수집 (💡 세오 12억 누락 방지망) ---
-@st.cache_data(ttl=1800, show_spinner="조달청 실시간 API 스캔 중...")
-def fetch_api_data_v30():
+# 💣 캐시 완전 삭제 (@st.cache_data 지움!)
+def fetch_api_data_raw():
     now = get_now_kst()
     try:
         RAW_KEY = "c1b379f7734c7d624ddefea07510eae71b6e12c5fb89970319d76c5ae8db5248"
@@ -156,10 +159,11 @@ def fetch_api_data_v30():
                 target_date = rcpt_date if rcpt_date else req_date
                 date_clean = target_date.replace('-', '').replace('.', '').strip()[:8]
                 
+                # 20일 이전 실적은 무조건 스킵
                 if date_clean and date_clean < cutoff_date:
                     continue
                 
-                # 💡 [세오 12억 구출 필터] 깐깐한 제3자단가 필터 삭제! 조달청이 이름표를 잘못 달아도 '다수공급자', '우수'면 무조건 잡는다!
+                # 💡 [세오 12억 구출 필터] 제3자단가, 다수공급자, 우수, MAS 모두 통과
                 cntrct_stle = item.findtext('cntrctCnclsStleNm', '')
                 if not cntrct_stle: continue
                 if not any(k in cntrct_stle for k in ['제3자단가', '다수공급자', '우수', 'MAS']):
@@ -190,25 +194,23 @@ def fetch_api_data_v30():
         
     except Exception: return pd.DataFrame(), f"⚠️ 파싱 에러"
 
-# --- 5. [캐싱 폭파] 데이터 통합 및 정제 (💡 4월 뻥튀기 절대 방어망) ---
-@st.cache_data(ttl=1800, show_spinner="데이터 통합 및 분석 중...")
-def get_processed_data_v30():
-    df_hist = load_historical_data_v30()
-    df_api, api_msg = fetch_api_data_v30()
+# 💣 캐시 완전 삭제 (@st.cache_data 지움!)
+def get_processed_data_raw():
+    df_hist = load_historical_data_raw()
+    df_api, api_msg = fetch_api_data_raw()
 
     if not df_hist.empty: df_hist['납품요구번호'] = df_hist['납품요구번호'].astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
     if not df_api.empty: df_api['납품요구번호'] = df_api['납품요구번호'].astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
 
     if not df_api.empty and not df_hist.empty:
-        # 💡 [핵심 3] 과거 엑셀에 이미 존재하는 '주문번호 블랙리스트' 생성
+        # 블랙리스트 방어막 (API 데이터 중 엑셀에 이미 있는 번호는 즉시 튕겨냄 - 4월 뻥튀기 방지)
         existing_nos = set(df_hist['납품요구번호'].unique())
         existing_nos.discard('') 
         existing_nos.discard('nan')
         
-        # 💡 API에서 가져온 데이터 중 엑셀에 이미 있는 번호는 0.001초 만에 입구컷! (절대 2배 뻥튀기 불가)
         df_api_clean = df_api[~df_api['납품요구번호'].isin(existing_nos)]
         
-        # 순수하게 이어 붙이기만 함! (과거 데이터 다중 품목 라인 절대 삭제 불가)
+        # 순수하게 이어 붙이기!
         df_total = pd.concat([df_hist, df_api_clean], ignore_index=True)
     elif not df_api.empty:
         df_total = df_api.copy()
@@ -222,19 +224,17 @@ def get_processed_data_v30():
 
     return df_total, api_msg
 
-# 데이터 로드 실행
-df_total, api_msg = get_processed_data_v30()
+# 🔥 매번 무조건 새로 데이터를 로드함 (거짓 캐시 절대 불가)
+df_total, api_msg = get_processed_data_raw()
 
 # --- 6. UI 및 새로고침 버튼 ---
-st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v30.0 (캐시 초기화 & 정밀 합산 완결판)</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v31.0 (캐시 제로 완전 쌩얼판)</div>", unsafe_allow_html=True)
 
 col_head1, col_head2 = st.columns([5, 1])
 with col_head1:
-    st.markdown(f"<div class='update-time'>🕒 상태: {api_msg}</div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='update-time'>🕒 상태: {api_msg} (캐시 없음: 항상 최신)</div>", unsafe_allow_html=True)
 with col_head2:
-    if st.button("🔄 실시간 데이터 새로고침", use_container_width=True):
-        fetch_api_data_v30.clear()
-        get_processed_data_v30.clear()
+    if st.button("🔄 즉시 새로고침", use_container_width=True):
         st.rerun()
 
 # --- 7. 사이드바 필터 ---
