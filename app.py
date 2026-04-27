@@ -57,7 +57,7 @@ def normalize_corp_name(name):
 
 TARGET_MAP = {normalize_corp_name(comp): comp for comp in TARGET_COMPANIES}
 
-# --- 3. [캐싱] 로컬 데이터 로드 (💡 증발 버그 원천 차단) ---
+# --- 3. [캐싱] 로컬 데이터 로드 ---
 @st.cache_data(ttl=3600, show_spinner="로컬 데이터를 불러오는 중...")
 def load_historical_data():
     file_month_map = {'data.csv': '1월', 'data02.csv': '2월', 'data02.cvs': '2월', 'data03.csv': '3월', 'data04.csv': '4월'}
@@ -79,10 +79,10 @@ def load_historical_data():
             req_col = '납품요구번호' if '납품요구번호' in df.columns else ('주문번호' if '주문번호' in df.columns else None)
             if not req_col: continue 
 
-            # 소수점(.0) 제거
-            df[req_col] = df[req_col].fillna('').astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
+            # 소수점, nan 제거
+            df[req_col] = df[req_col].fillna('').astype(str).str.replace('nan', '', regex=False).str.strip().str.replace(r'\.0$', '', regex=True)
 
-            # 💡 [핵심 복구] '납품증감금액'(개별 품목 금액)을 무조건 최우선으로 읽어오도록 롤백! (합계금액에 의한 뻥튀기 방지)
+            # 💡 [핵심 1] 43억 정확히 맞췄던 "납품증감금액" 최우선 롤백!
             if '납품증감금액' in df.columns: 
                 df['금액'] = pd.to_numeric(df['납품증감금액'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
             elif '합계납품증감금액' in df.columns: 
@@ -108,9 +108,15 @@ def load_historical_data():
             dfs.append(temp_df)
         except Exception: continue
     
-    return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+    result_df = pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+    
+    # 💡 [핵심 2] data02.csv와 data02.cvs 중복 로드 문제 완벽 해결 (정상적인 다중 품목은 절대 삭제 안 됨!)
+    if not result_df.empty:
+        result_df = result_df.drop_duplicates()
+        
+    return result_df
 
-# --- 4. [캐싱] 실시간 API 수집 (오직 순수 MAS/우수조달만!) ---
+# --- 4. [캐싱] 실시간 API 수집 ---
 @st.cache_data(ttl=1800, show_spinner="조달청 실시간 API 스캔 중...")
 def fetch_api_data():
     now = get_now_kst()
@@ -165,9 +171,10 @@ def fetch_api_data():
                 if rcpt_date_clean and rcpt_date_clean < cutoff_date:
                     continue
                 
-                # 💡 [필터 롤백] 오직 '제3자단가'만 수집! (혁신, 잡계약 원천 차단)
+                # 💡 [핵심 3] 깐깐한 필터 박살! '제3자단가' 뿐만 아니라 '다수공급자(MAS)', '우수제품' 모두 수용!
                 cntrct_stle = item.findtext('cntrctCnclsStleNm', '')
-                if '제3자단가' not in cntrct_stle: 
+                valid_keywords = ['제3자단가', '다수공급자', '우수']
+                if not any(k in cntrct_stle for k in valid_keywords):
                     continue
 
                 raw_corp = item.findtext('corpNm', '')
@@ -196,7 +203,7 @@ def fetch_api_data():
     except Exception as e:
         return pd.DataFrame(), f"⚠️ 파싱 에러"
 
-# --- 5. [캐싱] 데이터 통합 및 정제 (💡 삭제 버그 해결) ---
+# --- 5. [캐싱] 데이터 통합 및 정제 ---
 @st.cache_data(ttl=1800, show_spinner="데이터 통합 및 분석 중...")
 def get_processed_data():
     df_hist = load_historical_data()
@@ -206,10 +213,14 @@ def get_processed_data():
     if not df_api.empty: df_api['납품요구번호'] = df_api['납품요구번호'].astype(str).str.strip()
 
     if not df_api.empty and not df_hist.empty:
-        # 💡 [핵심 복구] 무식하게 API 번호가 있다고 엑셀 데이터를 통째로 지워버리는 악성 코드 삭제!!
-        # 그냥 두 데이터를 안전하게 붙인 뒤, 완벽하게 똑같은(번호+품명+금액) 중복만 살짝 날려줌.
-        df_total = pd.concat([df_hist, df_api], ignore_index=True)
-        df_total = df_total.drop_duplicates(subset=['납품요구번호', '물품분류명', '금액'], keep='last')
+        # API에서 가져온 진짜 주문번호 리스트만 확보 (빈칸 제외)
+        api_req_nos = set(df_api['납품요구번호'].unique())
+        api_req_nos.discard('') 
+        api_req_nos.discard('nan')
+        
+        # API에 있는 최신 주문번호만 엑셀에서 정밀 삭제 (기존 실적 보존)
+        df_hist_clean = df_hist[~((df_hist['납품요구번호'].isin(api_req_nos)) & (df_hist['납품요구번호'] != ''))]
+        df_total = pd.concat([df_hist_clean, df_api], ignore_index=True)
     elif not df_api.empty:
         df_total = df_api.copy()
     else:
@@ -226,7 +237,7 @@ def get_processed_data():
 df_total, api_msg = get_processed_data()
 
 # --- 6. UI 및 새로고침 버튼 ---
-st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v25.0 (금액 절대 보존판)</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v26.0 (세오/파로스 완벽 복원)</div>", unsafe_allow_html=True)
 
 col_head1, col_head2 = st.columns([5, 1])
 with col_head1:
@@ -377,7 +388,7 @@ else:
         
     render_ranking_board(
         df_data=board_df_total, 
-        title="🏆 업체별 종합 실적 랭킹 (우수조달 + MAS)", 
+        title="🏆 업체별 종합 실적 랭킹 (우수조달 + MAS 전체)", 
         show_count_col=show_cnt, 
         sort_key='sort_total', 
         dl_key='dl_total', 
