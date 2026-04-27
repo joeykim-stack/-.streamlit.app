@@ -6,7 +6,6 @@ from datetime import datetime, timedelta
 import plotly.express as px
 from io import BytesIO
 import time
-import urllib.parse
 
 # --- 1. 기본 설정 ---
 st.set_page_config(page_title="조달청 MAS+혁신 통합 분석", layout="wide")
@@ -47,41 +46,51 @@ def normalize_corp_name(name):
 
 TARGET_MAP = {normalize_corp_name(comp): comp for comp in TARGET_COMPANIES}
 
-# --- 3. [공통] CSV 데이터 클리닝 함수 ---
-def clean_and_parse_df(df, target_month, label):
+# --- 3. [공통] CSV 데이터 클리닝 및 슈퍼 금액 파서 ---
+def clean_and_parse_df(df, default_month, default_label):
     df.rename(columns=lambda x: str(x).strip(), inplace=True)
     if '계약업체명' in df.columns: df.rename(columns={'계약업체명': '업체명'}, inplace=True)
     if '품명' in df.columns: df.rename(columns={'품명': '물품분류명'}, inplace=True)
-    req_col = '납품요구번호' if '납품요구번호' in df.columns else ('주문번호' if '주문번호' in df.columns else None)
+    req_col = '납품요구번호' if '납품요구번호' in df.columns else ('주문번호' if '주문번호' in df.columns else '임시번호')
     
-    # 금액 파싱: 납품증감금액(개별단가) 우선
-    if '납품증감금액' in df.columns: 
-        df['금액'] = pd.to_numeric(df['납품증감금액'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
-    elif '납품요구금액' in df.columns: 
-        df['금액'] = pd.to_numeric(df['납품요구금액'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
-    else: df['금액'] = 0
+    if req_col == '임시번호': 
+        df[req_col] = range(len(df))
+    else:
+        df[req_col] = df[req_col].fillna('').astype(str).str.replace('nan', '', regex=False).str.replace(r'\.0$', '', regex=True).str.strip()
 
-    temp_df = df[['업체명', '물품분류명', '금액', req_col]].copy()
-    temp_df.columns = ['업체명', '물품분류명', '금액', '납품요구번호']
-    temp_df['월'] = target_month
-    temp_df['구분'] = label
+    # 💡 [핵심] 슈퍼 금액 파서: 0원이 아닌 진짜 금액을 모든 컬럼에서 싹 다 찾아냄!
+    df['금액'] = 0
+    candidate_cols = ['납품요구금액', '납품금액', '금액', '납품증감금액', '합계납품증감금액']
+    for col in candidate_cols:
+        if col in df.columns:
+            val = pd.to_numeric(df[col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+            # 기존 금액이 0원일 때만 새로운 컬럼의 숫자로 덮어씀 (0원 증발 방지)
+            df['금액'] = df['금액'].where(df['금액'] != 0, val)
+
+    # 월, 구분 정보가 미리 안 들어있으면 기본값 적용
+    if '월' not in df.columns: df['월'] = default_month
+    if '구분' not in df.columns: df['구분'] = default_label
+
+    temp_df = df[['업체명', '물품분류명', '금액', req_col, '월', '구분']].copy()
+    temp_df.columns = ['업체명', '물품분류명', '금액', '납품요구번호', '월', '구분']
     
+    # 업체명 필터링
     temp_df['업체명'] = temp_df['업체명'].astype(str).apply(lambda x: TARGET_MAP.get(normalize_corp_name(x), None))
     temp_df = temp_df.dropna(subset=['업체명'])
     return temp_df
 
-# --- 4. 데이터 로드 (MAS + 혁신) ---
-def load_all_data_v35():
+# --- 4. 데이터 로드 (MAS + 혁신 듀얼 트랙) ---
+def load_all_data_v36():
     all_dfs = []
     
-    # 1. 기존 MAS/우수조달 데이터 로드
+    # 1. 기존 MAS/우수조달 데이터 (data.csv ~ data04.csv)
     mas_files = {'data.csv': '1월', 'data02.csv': '2월', 'data03.csv': '3월', 'data04.csv': '4월'}
     for file, month in mas_files.items():
         try:
             for config in [{'encoding':'utf-16','sep':'\t'}, {'encoding':'cp949','sep':','}, {'encoding':'utf-8-sig','sep':','}]:
                 try:
                     df = pd.read_csv(file, encoding=config['encoding'], sep=config['sep'], on_bad_lines='skip', low_memory=False)
-                    if len(df.columns) > 5:
+                    if len(df.columns) > 3:
                         all_dfs.append(clean_and_parse_df(df, month, 'MAS/우수조달'))
                         break
                 except: pass
@@ -93,15 +102,24 @@ def load_all_data_v35():
         for config in [{'encoding':'utf-16','sep':'\t'}, {'encoding':'cp949','sep':','}, {'encoding':'utf-8-sig','sep':','}]:
             try:
                 df_inno = pd.read_csv(inno_file, encoding=config['encoding'], sep=config['sep'], on_bad_lines='skip', low_memory=False)
-                if len(df_inno.columns) > 5:
-                    # 혁신제품 파일은 1~4월이 섞여있으므로 날짜 컬럼에서 월을 추출
+                if len(df_inno.columns) > 3:
                     df_inno.rename(columns=lambda x: str(x).strip(), inplace=True)
-                    date_col = '납품요구일자' if '납품요구일자' in df_inno.columns else '접수일자'
-                    df_inno['extracted_month'] = pd.to_datetime(df_inno[date_col].astype(str).str[:10], errors='coerce').dt.month.fillna(0).astype(int).astype(str) + "월"
                     
-                    # 데이터 정리
-                    inno_cleaned = clean_and_parse_df(df_inno, '월', '혁신제품')
-                    inno_cleaned['월'] = df_inno['extracted_month'] # 위 clean_and_parse_df에서 설정된 '월'을 실제 월로 덮어씀
+                    # 날짜에서 월 추출
+                    date_col = '납품요구일자' if '납품요구일자' in df_inno.columns else ('접수일자' if '접수일자' in df_inno.columns else None)
+                    if date_col:
+                        df_inno['월'] = pd.to_datetime(df_inno[date_col].astype(str).str[:10], errors='coerce').dt.month.fillna(4).astype(int).astype(str) + "월"
+                    else:
+                        df_inno['월'] = '4월'
+                        
+                    # 혁신제품 여부 구분
+                    stle_col = '계약체결형태명' if '계약체결형태명' in df_inno.columns else ('계약형태' if '계약형태' in df_inno.columns else None)
+                    if stle_col:
+                        df_inno['구분'] = df_inno[stle_col].apply(lambda x: '혁신제품' if '혁신' in str(x) else 'MAS/우수조달')
+                    else:
+                        df_inno['구분'] = '혁신제품'
+                        
+                    inno_cleaned = clean_and_parse_df(df_inno, '4월', '혁신제품')
                     all_dfs.append(inno_cleaned)
                     break
             except: pass
@@ -111,9 +129,10 @@ def load_all_data_v35():
     return result.drop_duplicates()
 
 # --- 5. 대시보드 구동 ---
-df_total = load_all_data_v35()
+df_total = load_all_data_v36()
 
-st.markdown(f"<div class='main-title'>🏆 조달 통합 분석 v35.0 (MAS + 혁신제품 파일 통합)</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='main-title'>🏆 조달 통합 분석 v36.0 (슈퍼 금액 파서 탑재)</div>", unsafe_allow_html=True)
+st.write(f"🕒 데이터 상태: 로컬 파일(data.csv ~ data_all.csv) 병합 및 금액 추출 완료!")
 
 # 품목 필터
 with st.sidebar:
@@ -123,14 +142,20 @@ with st.sidebar:
         selected_items = []
     else:
         all_items = sorted(df_total['물품분류명'].unique())
-        selected_items = [i for i in all_items if st.checkbox(i, value=True, key=f"sidebar_{i}")]
+        col_s1, col_s2 = st.columns(2)
+        if col_s1.button("✅ 전체 선택"):
+            for item in all_items: st.session_state[f"cb_{item}"] = True
+        if col_s2.button("❌ 전체 삭제"):
+            for item in all_items: st.session_state[f"cb_{item}"] = False
+        st.write("---")
+        selected_items = [i for i in all_items if st.checkbox(i, value=st.session_state.get(f"cb_{i}", True), key=f"cb_{i}")]
 
 if not selected_items:
     st.info("👈 분석할 품목을 선택해주세요.")
 else:
     df_f = df_total[df_total['물품분류명'].isin(selected_items)]
     
-    # 제외 품목 필터
+    # 37개 쓸데없는 품목 제거
     pattern = '|'.join(EXCLUDE_ITEMS)
     df_f = df_f[~df_f['물품분류명'].astype(str).str.contains(pattern, na=False, regex=True)]
 
