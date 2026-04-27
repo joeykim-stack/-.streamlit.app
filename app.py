@@ -79,9 +79,10 @@ def load_historical_data():
             req_col = '납품요구번호' if '납품요구번호' in df.columns else ('주문번호' if '주문번호' in df.columns else None)
             if not req_col: continue 
 
-            # 💡 [버그 픽스 1] 엑셀에서 읽어온 주문번호의 소수점(.0) 강제 제거!
+            # 💡 [핵심] 소수점 뻥튀기 버그 방지 (예: 123456.0 -> 123456)
             df[req_col] = df[req_col].fillna('').astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
 
+            # 개별 품목 금액 우선 적용
             amt_col = None
             for col in ['납품요구금액', '납품금액', '납품증감금액', '금액']:
                 if col in df.columns:
@@ -120,13 +121,14 @@ def fetch_api_data():
         API_KEY = urllib.parse.unquote(RAW_KEY)
         URL = "http://apis.data.go.kr/1230000/at/ShoppingMallPrdctInfoService/getDlvrReqInfoList"
         
-        # 💡 [버그 픽스 2] API는 무조건 4월 전체를 긁어오도록 넓게 세팅 (서버 500에러 방지)
         bgn_date = now.strftime('%Y%m') + '01'
         end_date = now.strftime('%Y%m%d')
+        cutoff_date = now.strftime('%Y%m') + '20'
         
         all_new_data = []
         page_no = 1
         total_count = 0
+        added_count = 0
         
         while True:
             params = {
@@ -156,8 +158,20 @@ def fetch_api_data():
             if not items: break
             
             for item in items:
-                # 💡 [버그 픽스 3] 제3자단가 필터 삭제! (MAS, 혁신제품, 총액계약 등 쇼핑몰 매출 영끌 합산)
+                rcpt_date = item.findtext('dlvrReqRcptDate', '')
+                if not rcpt_date: rcpt_date = item.findtext('dlvrReqDate', '')
                 
+                rcpt_date_clean = rcpt_date.replace('-', '').replace('.', '').strip()[:8]
+                
+                # 20일 이전 데이터는 엑셀에 있으므로 차단
+                if rcpt_date_clean and rcpt_date_clean < cutoff_date:
+                    continue
+                
+                # 💡 [핵심 복구] 잡동사니 혁신/총액계약 다 버리고 오직 진성 실적 '제3자단가(MAS/우수조달)'만 수집!
+                cntrct_stle = item.findtext('cntrctCnclsStleNm', '')
+                if '제3자단가' not in cntrct_stle: 
+                    continue
+
                 raw_corp = item.findtext('corpNm', '')
                 norm_corp = normalize_corp_name(raw_corp)
                 
@@ -172,39 +186,37 @@ def fetch_api_data():
                         '월': '4월',
                         'MAS여부': item.findtext('masYn', 'Y').strip().upper() 
                     })
+                    added_count += 1
             
             if page_no * 999 >= total_count: break
             page_no += 1
 
         if all_new_data:
-            return pd.DataFrame(all_new_data), f"🟢 4월 실시간 데이터 {len(all_new_data)}건 수집 완료!"
-        return pd.DataFrame(), f"🔵 4월 실시간 데이터 없음"
+            return pd.DataFrame(all_new_data), f"🟢 4월 스캔 완료 -> 20일 이후 실적 {added_count}건 수집!"
+        return pd.DataFrame(), f"🔵 4월 스캔 완료 (20일 이후 타겟 실적 없음)"
         
     except Exception as e:
         return pd.DataFrame(), f"⚠️ 파싱 에러"
 
-# --- 5. [캐싱] 데이터 통합 및 정제 (💡 완벽한 스마트 덮어쓰기) ---
+# --- 5. [캐싱] 데이터 통합 및 정제 ---
 @st.cache_data(ttl=1800, show_spinner="데이터 통합 및 분석 중...")
 def get_processed_data():
     df_hist = load_historical_data()
     df_api, api_msg = fetch_api_data()
 
     if not df_api.empty and not df_hist.empty:
-        # 💡 [버그 픽스 4] 무식한 drop_duplicates 삭제! API에 존재하는 주문번호만 엑셀에서 핀포인트로 날림!
+        # 스마트 덮어쓰기: API에서 수집해 온 최신 주문번호가 엑셀에 있다면, 과거 엑셀에서 그 번호만 핀포인트로 삭제
         api_req_nos = set(df_api['납품요구번호'].unique())
-        if '' in api_req_nos: api_req_nos.remove('') # 빈칸은 제외
+        if '' in api_req_nos: api_req_nos.remove('') 
         
-        # API에서 가져온 주문번호가 과거 엑셀에 있다면, 과거 엑셀에서 통째로 도려냄 (API의 최신값으로 대체하기 위함)
         df_hist_clean = df_hist[~df_hist['납품요구번호'].isin(api_req_nos)]
-        
-        # 1~3월의 무사한 데이터 + API 최신 데이터 병합
         df_total = pd.concat([df_hist_clean, df_api], ignore_index=True)
     elif not df_api.empty:
         df_total = df_api.copy()
     else:
         df_total = df_hist.copy()
 
-    # 💡 37개 쓰레기 품목 차단 필터
+    # 37개 쓰레기 품목 차단 필터
     if not df_total.empty and '물품분류명' in df_total.columns:
         pattern = '|'.join(EXCLUDE_ITEMS)
         df_total = df_total[~df_total['물품분류명'].astype(str).str.contains(pattern, na=False, regex=True)]
@@ -215,7 +227,7 @@ def get_processed_data():
 df_total, api_msg = get_processed_data()
 
 # --- 6. UI 및 새로고침 버튼 ---
-st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v23.0 (초정밀 영끌 합산판)</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v24.0 (순정 제3자단가 복원)</div>", unsafe_allow_html=True)
 
 col_head1, col_head2 = st.columns([5, 1])
 with col_head1:
@@ -351,13 +363,12 @@ else:
             final.to_excel(wr, index=False, sheet_name='실적랭킹')
         st.download_button("💾 엑셀 다운로드", xlsx.getvalue(), f'조달랭킹_{dl_key}_{get_now_kst().strftime("%Y%m%d")}.xlsx', key=dl_key)
 
-
     st.subheader("⚙️ 랭킹 보드 컨트롤")
     ctrl_col_a, ctrl_col_b = st.columns(2)
     with ctrl_col_a:
         show_cnt = st.checkbox("📝 월/분기별 계약건수 함께 보기", value=False)
     with ctrl_col_b:
-        include_mas = st.checkbox("🏢 종합 랭킹에 MAS 계약 포함 (해제 시 '우수조달/혁신' 등만 표시)", value=True)
+        include_mas = st.checkbox("🏢 종합 랭킹에 MAS 계약 포함 (해제 시 '우수조달'만 표시)", value=True)
 
     st.markdown("---")
 
@@ -367,7 +378,7 @@ else:
         
     render_ranking_board(
         df_data=board_df_total, 
-        title="🏆 업체별 종합 실적 랭킹 (우수조달 + MAS + 혁신제품 등 쇼핑몰 전체)", 
+        title="🏆 업체별 종합 실적 랭킹 (우수조달 + MAS)", 
         show_count_col=show_cnt, 
         sort_key='sort_total', 
         dl_key='dl_total', 
