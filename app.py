@@ -101,7 +101,7 @@ def load_historical_data():
         except Exception: continue
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
-# --- 4. [캐싱] 실시간 API 수집 (체크박스 누를 때마다 실행 방지) ---
+# --- 4. [캐싱] 실시간 API 수집 (20일 이후 데이터만 정확히 가져오기) ---
 @st.cache_data(ttl=1800, show_spinner="조달청 실시간 API 스캔 중...")
 def fetch_api_data():
     now = get_now_kst()
@@ -112,6 +112,8 @@ def fetch_api_data():
         
         bgn_date = now.strftime('%Y%m') + '01'
         end_date = now.strftime('%Y%m%d')
+        
+        # 💡 로컬 CSV가 19일까지 있으므로 API는 무조건 20일 데이터부터만 수집!
         cutoff_date = now.strftime('%Y%m') + '20'
         
         all_new_data = []
@@ -151,6 +153,8 @@ def fetch_api_data():
                 if not rcpt_date: rcpt_date = item.findtext('dlvrReqDate', '')
                 
                 rcpt_date_clean = rcpt_date.replace('-', '').replace('.', '').strip()[:8]
+                
+                # 💡 20일 이전 데이터는 1원 하나 남김없이 폐기 (엑셀에 있으니까)
                 if rcpt_date_clean and rcpt_date_clean < cutoff_date:
                     continue
                 
@@ -187,18 +191,14 @@ def get_processed_data():
     df_hist = load_historical_data()
     df_api, api_msg = fetch_api_data()
 
-    if not df_hist.empty: df_hist['납품요구번호'] = df_hist['납품요구번호'].astype(str).str.strip()
-    if not df_api.empty: df_api['납품요구번호'] = df_api['납품요구번호'].astype(str).str.strip()
-
-    if not df_api.empty and not df_hist.empty:
-        api_req_nos = df_api['납품요구번호'].unique()
-        df_hist_clean = df_hist[~df_hist['납품요구번호'].isin(api_req_nos)]
-        df_total = pd.concat([df_hist_clean, df_api], ignore_index=True)
-    elif not df_api.empty:
-        df_total = df_api.copy()
+    # 💡 [핵심 복구] V19의 완벽했던 퍼즐 맞추기 로직 복구 (어설픈 중복 제거 로직 완전 삭제!)
+    # 이미 fetch_api_data()에서 20일 이전 데이터를 차단했기 때문에 그냥 더하기만 하면 됨!
+    if not df_api.empty:
+        df_total = pd.concat([df_hist, df_api], ignore_index=True)
     else:
         df_total = df_hist.copy()
 
+    # 37개 쓰레기 품목 원천 차단
     if not df_total.empty and '물품분류명' in df_total.columns:
         pattern = '|'.join(EXCLUDE_ITEMS)
         df_total = df_total[~df_total['물품분류명'].astype(str).str.contains(pattern, na=False, regex=True)]
@@ -209,7 +209,7 @@ def get_processed_data():
 df_total, api_msg = get_processed_data()
 
 # --- 6. UI 및 새로고침 버튼 ---
-st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v20.0 (초고속판)</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v21.0 (금액정상+초고속판)</div>", unsafe_allow_html=True)
 
 col_head1, col_head2 = st.columns([5, 1])
 with col_head1:
