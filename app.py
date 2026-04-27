@@ -7,6 +7,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from io import BytesIO
 import time
+import urllib.parse
 
 # --- 1. 기본 설정 및 KST 시계 ---
 st.set_page_config(page_title="조달청 실적 분석 대시보드", layout="wide")
@@ -56,13 +57,10 @@ def normalize_corp_name(name):
 
 TARGET_MAP = {normalize_corp_name(comp): comp for comp in TARGET_COMPANIES}
 
-# --- 3. [로컬 데이터] ---
-@st.cache_data(ttl=3600)
+# --- 3. [캐싱] 로컬 데이터 로드 ---
+@st.cache_data(ttl=3600, show_spinner="로컬 데이터를 불러오는 중...")
 def load_historical_data():
-    file_month_map = {
-        'data.csv': '1월', 'data02.csv': '2월', 'data02.cvs': '2월', 
-        'data03.csv': '3월', 'data04.csv': '4월'
-    }
+    file_month_map = {'data.csv': '1월', 'data02.csv': '2월', 'data02.cvs': '2월', 'data03.csv': '3월', 'data04.csv': '4월'}
     dfs = []
     for file, target_month in file_month_map.items():
         try:
@@ -103,82 +101,58 @@ def load_historical_data():
         except Exception: continue
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
-# --- 4. [실시간 API] 💡 철벽 방어 및 스마트 분리 ---
-def update_realtime_data():
-    if 'api_df' not in st.session_state: st.session_state.api_df = pd.DataFrame()
-    if 'last_update' not in st.session_state: st.session_state.last_update = "업데이트 전"
-    if 'retry_time' not in st.session_state: st.session_state.retry_time = None
-    
+# --- 4. [캐싱] 실시간 API 수집 (체크박스 누를 때마다 실행 방지) ---
+@st.cache_data(ttl=1800, show_spinner="조달청 실시간 API 스캔 중...")
+def fetch_api_data():
     now = get_now_kst()
-    if st.session_state.retry_time and now < st.session_state.retry_time:
-        return st.session_state.api_df, f"⏳ 대기 중 (다음 시도: {st.session_state.retry_time.strftime('%H:%M:%S')})"
-    
     try:
-        import urllib.parse
         RAW_KEY = "c1b379f7734c7d624ddefea07510eae71b6e12c5fb89970319d76c5ae8db5248"
         API_KEY = urllib.parse.unquote(RAW_KEY)
         URL = "http://apis.data.go.kr/1230000/at/ShoppingMallPrdctInfoService/getDlvrReqInfoList"
         
         bgn_date = now.strftime('%Y%m') + '01'
         end_date = now.strftime('%Y%m%d')
-        
-        # 💡 [핵심] API에서 긁어온 데이터 중, 이 날짜 이전의 데이터는 무조건 버린다!
-        # (로컬 CSV가 19일까지 있으므로 API는 20일 데이터부터만 수집)
         cutoff_date = now.strftime('%Y%m') + '20'
         
         all_new_data = []
         page_no = 1
         total_count = 0
-        added_count = 0 # 20일 이후로 실제로 담긴 건수
+        added_count = 0
         
         while True:
             params = {
-                'serviceKey': API_KEY, 
-                'numOfRows': '999', 
-                'pageNo': str(page_no),
-                'inqryDiv': '1', 
-                'inqryBgnDate': bgn_date, 
-                'inqryEndDate': end_date
+                'serviceKey': API_KEY, 'numOfRows': '999', 'pageNo': str(page_no),
+                'inqryDiv': '1', 'inqryBgnDate': bgn_date, 'inqryEndDate': end_date
             }
             
             try:
                 res = requests.get(URL, params=params, timeout=15)
             except Exception as e:
-                st.session_state.retry_time = now + timedelta(minutes=5)
                 return pd.DataFrame(), f"🚨 통신 실패 (네트워크 끊김)"
             
             if res.status_code != 200:
-                st.session_state.retry_time = now + timedelta(minutes=5)
                 return pd.DataFrame(), f"🚨 HTTP {res.status_code} 에러"
 
             root = ET.fromstring(res.content)
-            
             result_code = root.findtext('.//resultCode')
             if result_code and result_code not in ['00', '0']:
-                err_msg = root.findtext('.//resultMsg', '오류')
-                st.session_state.retry_time = now + timedelta(minutes=5)
-                return pd.DataFrame(), f"🚨 API 거부: [{result_code}] {err_msg}"
+                return pd.DataFrame(), f"🚨 API 거부: [{result_code}]"
 
             total_count_str = root.findtext('.//totalCount')
-            if total_count_str:
-                total_count = int(total_count_str)
+            if total_count_str: total_count = int(total_count_str)
 
-            if total_count == 0:
-                break
+            if total_count == 0: break
 
             items = root.findall('.//item')
             if not items: break
             
             for item in items:
-                # 💡 [핵심] 날짜 철벽 필터링 (20일 이전이면 가차 없이 스킵)
                 rcpt_date = item.findtext('dlvrReqRcptDate', '')
-                if not rcpt_date:
-                    rcpt_date = item.findtext('dlvrReqDate', '') # 보험용
+                if not rcpt_date: rcpt_date = item.findtext('dlvrReqDate', '')
                 
                 rcpt_date_clean = rcpt_date.replace('-', '').replace('.', '').strip()[:8]
-                
                 if rcpt_date_clean and rcpt_date_clean < cutoff_date:
-                    continue # 1일~19일 데이터는 버림! (로컬 CSV가 처리함)
+                    continue
                 
                 cntrct_stle = item.findtext('cntrctCnclsStleNm', '')
                 if '제3자단가' not in cntrct_stle: continue
@@ -187,9 +161,8 @@ def update_realtime_data():
                 norm_corp = normalize_corp_name(raw_corp)
                 
                 if norm_corp in TARGET_MAP:
-                    matched_corp_name = TARGET_MAP[norm_corp]
                     all_new_data.append({
-                        '업체명': matched_corp_name, 
+                        '업체명': TARGET_MAP[norm_corp], 
                         '물품분류명': item.findtext('prdctClsfcNm', ''), 
                         '금액': float(item.findtext('dlvrReqAmt', 0)), 
                         '납품요구번호': item.findtext('dlvrReqNo', f'API_{time.time()}'), 
@@ -201,36 +174,53 @@ def update_realtime_data():
             if page_no * 999 >= total_count: break
             page_no += 1
 
-        st.session_state.last_update = now.strftime('%H:%M:%S')
         if all_new_data:
-            st.session_state.api_df = pd.DataFrame(all_new_data)
-            return st.session_state.api_df, f"🟢 4월 스캔 완료 -> 20일 이후 실적 {added_count}건 수집!"
-        
+            return pd.DataFrame(all_new_data), f"🟢 4월 스캔 완료 -> 20일 이후 실적 {added_count}건 수집!"
         return pd.DataFrame(), f"🔵 4월 스캔 완료 (20일 이후 타겟 실적 없음)"
         
     except Exception as e:
-        st.session_state.retry_time = now + timedelta(minutes=5)
-        return pd.DataFrame(), f"⚠️ 파싱 에러: {str(e)}"
+        return pd.DataFrame(), f"⚠️ 파싱 에러"
 
-# --- 5. 데이터 통합 실행 (퍼즐 맞추기) ---
-df_hist = load_historical_data()
-df_api, api_msg = update_realtime_data()
+# --- 5. [캐싱] 데이터 통합 및 정제 (가장 무거운 작업) ---
+@st.cache_data(ttl=1800, show_spinner="데이터 통합 및 분석 중...")
+def get_processed_data():
+    df_hist = load_historical_data()
+    df_api, api_msg = fetch_api_data()
 
-# df_hist(1~19일) + df_api(20일 이후) = 완벽한 퍼즐 (중복 없음!)
-if not df_api.empty:
-    df_total = pd.concat([df_hist, df_api], ignore_index=True)
-else:
-    df_total = df_hist.copy()
+    if not df_hist.empty: df_hist['납품요구번호'] = df_hist['납품요구번호'].astype(str).str.strip()
+    if not df_api.empty: df_api['납품요구번호'] = df_api['납품요구번호'].astype(str).str.strip()
 
-# 💡 [강력 필터] 37개 쓸데없는 품목 원천 차단
-if not df_total.empty and '물품분류명' in df_total.columns:
-    pattern = '|'.join(EXCLUDE_ITEMS)
-    df_total = df_total[~df_total['물품분류명'].astype(str).str.contains(pattern, na=False, regex=True)]
+    if not df_api.empty and not df_hist.empty:
+        api_req_nos = df_api['납품요구번호'].unique()
+        df_hist_clean = df_hist[~df_hist['납품요구번호'].isin(api_req_nos)]
+        df_total = pd.concat([df_hist_clean, df_api], ignore_index=True)
+    elif not df_api.empty:
+        df_total = df_api.copy()
+    else:
+        df_total = df_hist.copy()
 
-st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v19.0</div>", unsafe_allow_html=True)
-st.markdown(f"<div class='update-time'>🕒 마지막 업데이트(KST): {st.session_state.last_update} | 상태: {api_msg}</div>", unsafe_allow_html=True)
+    if not df_total.empty and '물품분류명' in df_total.columns:
+        pattern = '|'.join(EXCLUDE_ITEMS)
+        df_total = df_total[~df_total['물품분류명'].astype(str).str.contains(pattern, na=False, regex=True)]
 
-# --- 6. 사이드바 필터 ---
+    return df_total, api_msg
+
+# 데이터 로드 실행
+df_total, api_msg = get_processed_data()
+
+# --- 6. UI 및 새로고침 버튼 ---
+st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v20.0 (초고속판)</div>", unsafe_allow_html=True)
+
+col_head1, col_head2 = st.columns([5, 1])
+with col_head1:
+    st.markdown(f"<div class='update-time'>🕒 상태: {api_msg}</div>", unsafe_allow_html=True)
+with col_head2:
+    if st.button("🔄 실시간 데이터 새로고침", use_container_width=True):
+        fetch_api_data.clear()
+        get_processed_data.clear()
+        st.rerun()
+
+# --- 7. 사이드바 필터 ---
 with st.sidebar:
     st.header("🔍 품목 상세 필터")
     if df_total.empty:
@@ -239,9 +229,9 @@ with st.sidebar:
     else:
         all_items = sorted(df_total['물품분류명'].dropna().unique())
         col_s1, col_s2 = st.columns(2)
-        if col_s1.button("✅ 전체 품목 선택"):
+        if col_s1.button("✅ 전체 선택"):
             for item in all_items: st.session_state[f"cb_{item}"] = True
-        if col_s2.button("❌ 전체 품목 삭제"):
+        if col_s2.button("❌ 전체 삭제"):
             for item in all_items: st.session_state[f"cb_{item}"] = False
 
         st.write("---")
@@ -251,7 +241,7 @@ with st.sidebar:
             if cb_key not in st.session_state: st.session_state[cb_key] = True
             if st.checkbox(item, key=cb_key): selected_items.append(item)
 
-# --- 7. 메인 화면 (요약 & 차트) ---
+# --- 8. 메인 화면 (요약 & 차트) ---
 if not selected_items:
     st.info("👈 왼쪽 사이드바에서 분석할 품목을 1개 이상 선택해주세요.")
 else:
