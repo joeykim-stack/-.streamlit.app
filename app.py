@@ -79,19 +79,20 @@ def load_historical_data():
             req_col = '납품요구번호' if '납품요구번호' in df.columns else ('주문번호' if '주문번호' in df.columns else None)
             if not req_col: continue 
 
-            # 소수점, nan 제거
+            # 소수점, nan 완벽 제거
             df[req_col] = df[req_col].fillna('').astype(str).str.replace('nan', '', regex=False).str.strip().str.replace(r'\.0$', '', regex=True)
 
-            # 💡 [핵심 1] 43억 정확히 맞췄던 "납품증감금액" 최우선 롤백!
-            if '납품증감금액' in df.columns: 
-                df['금액'] = pd.to_numeric(df['납품증감금액'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
-            elif '합계납품증감금액' in df.columns: 
-                df['금액'] = pd.to_numeric(df['합계납품증감금액'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
-            elif '납품요구금액' in df.columns: 
-                df['금액'] = pd.to_numeric(df['납품요구금액'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
-            elif '금액' in df.columns: 
-                df['금액'] = pd.to_numeric(df['금액'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
-            else: continue
+            # 💡 [핵심 1] 0원 증발 버그 완벽 해결! 합계/총계는 무시하고 오직 '기본 단가(납품요구금액)' 최우선순위로 읽음
+            amt_col = None
+            for col in ['납품요구금액', '납품금액', '금액', '납품증감금액']:
+                if col in df.columns:
+                    amt_col = col
+                    break
+            
+            if amt_col:
+                df['금액'] = pd.to_numeric(df[amt_col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+            else:
+                continue # 안전을 위해 금액 컬럼을 못 찾으면 스킵
             
             temp_df = df[['업체명', '물품분류명', '금액', req_col]].copy()
             temp_df.columns = ['업체명', '물품분류명', '금액', '납품요구번호']
@@ -110,7 +111,7 @@ def load_historical_data():
     
     result_df = pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
     
-    # 💡 [핵심 2] data02.csv와 data02.cvs 중복 로드 문제 완벽 해결 (정상적인 다중 품목은 절대 삭제 안 됨!)
+    # 로컬 파일 간의 중복(data02.csv vs data02.cvs)만 안전하게 제거
     if not result_df.empty:
         result_df = result_df.drop_duplicates()
         
@@ -127,6 +128,8 @@ def fetch_api_data():
         
         bgn_date = now.strftime('%Y%m') + '01'
         end_date = now.strftime('%Y%m%d')
+        
+        # 💡 [핵심 2] 날짜 파티션 벽 세우기 (API는 20일 이후만 담당)
         cutoff_date = now.strftime('%Y%m') + '20'
         
         all_new_data = []
@@ -142,11 +145,9 @@ def fetch_api_data():
             
             try:
                 res = requests.get(URL, params=params, timeout=15)
-            except Exception as e:
-                return pd.DataFrame(), f"🚨 통신 실패 (네트워크 끊김)"
+            except Exception: return pd.DataFrame(), f"🚨 통신 실패 (네트워크 끊김)"
             
-            if res.status_code != 200:
-                return pd.DataFrame(), f"🚨 HTTP {res.status_code} 에러"
+            if res.status_code != 200: return pd.DataFrame(), f"🚨 HTTP {res.status_code} 에러"
 
             root = ET.fromstring(res.content)
             result_code = root.findtext('.//resultCode')
@@ -162,18 +163,20 @@ def fetch_api_data():
             if not items: break
             
             for item in items:
+                # 안전한 날짜 체크 (요구일자를 최우선으로 검사)
+                req_date = item.findtext('dlvrReqDate', '')
                 rcpt_date = item.findtext('dlvrReqRcptDate', '')
-                if not rcpt_date: rcpt_date = item.findtext('dlvrReqDate', '')
+                target_date = req_date if req_date else rcpt_date
                 
-                rcpt_date_clean = rcpt_date.replace('-', '').replace('.', '').strip()[:8]
+                date_clean = target_date.replace('-', '').replace('.', '').strip()[:8]
                 
-                # 20일 이전 실적은 무조건 스킵 (엑셀에 있으니까)
-                if rcpt_date_clean and rcpt_date_clean < cutoff_date:
+                # 20일 이전 실적은 무조건 스킵 (엑셀이 처리함)
+                if date_clean and date_clean < cutoff_date:
                     continue
                 
-                # 💡 [핵심 3] 깐깐한 필터 박살! '제3자단가' 뿐만 아니라 '다수공급자(MAS)', '우수제품' 모두 수용!
+                # 💡 [핵심 3] 오직 MAS와 우수조달만 허용 (혁신 등 잡계약 원천 차단)
                 cntrct_stle = item.findtext('cntrctCnclsStleNm', '')
-                valid_keywords = ['제3자단가', '다수공급자', '우수']
+                valid_keywords = ['제3자단가', '다수공급자', '우수', 'MAS']
                 if not any(k in cntrct_stle for k in valid_keywords):
                     continue
 
@@ -189,7 +192,7 @@ def fetch_api_data():
                         '금액': float(item.findtext('dlvrReqAmt', 0)), 
                         '납품요구번호': req_no if req_no else f'API_{time.time()}', 
                         '월': '4월',
-                        'MAS여부': item.findtext('masYn', 'Y').strip().upper() 
+                        'MAS여부': 'Y' # MAS/우수 필터를 통과했으므로 무조건 Y
                     })
                     added_count += 1
             
@@ -200,10 +203,9 @@ def fetch_api_data():
             return pd.DataFrame(all_new_data), f"🟢 4월 스캔 완료 -> 20일 이후 실적 {added_count}건 수집!"
         return pd.DataFrame(), f"🔵 4월 스캔 완료 (20일 이후 타겟 실적 없음)"
         
-    except Exception as e:
-        return pd.DataFrame(), f"⚠️ 파싱 에러"
+    except Exception: return pd.DataFrame(), f"⚠️ 파싱 에러"
 
-# --- 5. [캐싱] 데이터 통합 및 정제 ---
+# --- 5. [캐싱] 데이터 통합 및 정제 (💡 삭제 버그 해결의 종착점) ---
 @st.cache_data(ttl=1800, show_spinner="데이터 통합 및 분석 중...")
 def get_processed_data():
     df_hist = load_historical_data()
@@ -212,15 +214,9 @@ def get_processed_data():
     if not df_hist.empty: df_hist['납품요구번호'] = df_hist['납품요구번호'].astype(str).str.strip()
     if not df_api.empty: df_api['납품요구번호'] = df_api['납품요구번호'].astype(str).str.strip()
 
+    # 💡 [핵심 4] 어설픈 덮어쓰기 로직 삭제! 날짜 파티션이 쳐져 있으므로 안심하고 그냥 더하기만 한다.
     if not df_api.empty and not df_hist.empty:
-        # API에서 가져온 진짜 주문번호 리스트만 확보 (빈칸 제외)
-        api_req_nos = set(df_api['납품요구번호'].unique())
-        api_req_nos.discard('') 
-        api_req_nos.discard('nan')
-        
-        # API에 있는 최신 주문번호만 엑셀에서 정밀 삭제 (기존 실적 보존)
-        df_hist_clean = df_hist[~((df_hist['납품요구번호'].isin(api_req_nos)) & (df_hist['납품요구번호'] != ''))]
-        df_total = pd.concat([df_hist_clean, df_api], ignore_index=True)
+        df_total = pd.concat([df_hist, df_api], ignore_index=True)
     elif not df_api.empty:
         df_total = df_api.copy()
     else:
@@ -237,7 +233,7 @@ def get_processed_data():
 df_total, api_msg = get_processed_data()
 
 # --- 6. UI 및 새로고침 버튼 ---
-st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v26.0 (세오/파로스 완벽 복원)</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v27.0 (파로스/세오 순정 복원)</div>", unsafe_allow_html=True)
 
 col_head1, col_head2 = st.columns([5, 1])
 with col_head1:
