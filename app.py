@@ -57,7 +57,7 @@ def normalize_corp_name(name):
 
 TARGET_MAP = {normalize_corp_name(comp): comp for comp in TARGET_COMPANIES}
 
-# --- 3. [캐싱] 로컬 데이터 로드 ---
+# --- 3. [캐싱] 로컬 데이터 로드 (💡 금액 파싱 버그 완벽 수정) ---
 @st.cache_data(ttl=3600, show_spinner="로컬 데이터를 불러오는 중...")
 def load_historical_data():
     file_month_map = {'data.csv': '1월', 'data02.csv': '2월', 'data02.cvs': '2월', 'data03.csv': '3월', 'data04.csv': '4월'}
@@ -79,11 +79,22 @@ def load_historical_data():
             req_col = '납품요구번호' if '납품요구번호' in df.columns else ('주문번호' if '주문번호' in df.columns else None)
             if not req_col: continue 
 
-            if '납품증감금액' in df.columns: df['금액'] = pd.to_numeric(df['납품증감금액'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
-            elif '합계납품증감금액' in df.columns: df['금액'] = pd.to_numeric(df['합계납품증감금액'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
-            elif '납품요구금액' in df.columns: df['금액'] = pd.to_numeric(df['납품요구금액'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
-            elif '금액' in df.columns: df['금액'] = pd.to_numeric(df['금액'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
-            else: continue
+            # 💡 [핵심 수정] 금액 뻥튀기 버그 제거! '개별 품목 금액'을 '합계금액'보다 무조건 먼저 찾도록 순서 고정!
+            amt_col = None
+            for col in ['납품요구금액', '납품금액', '납품증감금액', '금액']:
+                if col in df.columns:
+                    amt_col = col
+                    break
+            
+            if amt_col:
+                df['금액'] = pd.to_numeric(df[amt_col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+            else:
+                # 개별 금액이 아예 없는 엑셀일 경우에만 최후의 보루로 합계금액 사용
+                total_cols = [c for c in df.columns if '합계' in c and '금액' in c]
+                if total_cols:
+                    df['금액'] = pd.to_numeric(df[total_cols[0]].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+                else:
+                    continue
             
             temp_df = df[['업체명', '물품분류명', '금액', req_col]].copy()
             temp_df.columns = ['업체명', '물품분류명', '금액', '납품요구번호']
@@ -99,9 +110,11 @@ def load_historical_data():
                 
             dfs.append(temp_df)
         except Exception: continue
-    return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+    
+    result_df = pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+    return result_df
 
-# --- 4. [캐싱] 실시간 API 수집 (20일 이후 데이터만 정확히 가져오기) ---
+# --- 4. [캐싱] 실시간 API 수집 ---
 @st.cache_data(ttl=1800, show_spinner="조달청 실시간 API 스캔 중...")
 def fetch_api_data():
     now = get_now_kst()
@@ -112,8 +125,6 @@ def fetch_api_data():
         
         bgn_date = now.strftime('%Y%m') + '01'
         end_date = now.strftime('%Y%m%d')
-        
-        # 💡 로컬 CSV가 19일까지 있으므로 API는 무조건 20일 데이터부터만 수집!
         cutoff_date = now.strftime('%Y%m') + '20'
         
         all_new_data = []
@@ -153,8 +164,6 @@ def fetch_api_data():
                 if not rcpt_date: rcpt_date = item.findtext('dlvrReqDate', '')
                 
                 rcpt_date_clean = rcpt_date.replace('-', '').replace('.', '').strip()[:8]
-                
-                # 💡 20일 이전 데이터는 1원 하나 남김없이 폐기 (엑셀에 있으니까)
                 if rcpt_date_clean and rcpt_date_clean < cutoff_date:
                     continue
                 
@@ -185,20 +194,29 @@ def fetch_api_data():
     except Exception as e:
         return pd.DataFrame(), f"⚠️ 파싱 에러"
 
-# --- 5. [캐싱] 데이터 통합 및 정제 (가장 무거운 작업) ---
+# --- 5. [캐싱] 데이터 통합 및 정제 (💡 완벽한 중복 제거 로직) ---
 @st.cache_data(ttl=1800, show_spinner="데이터 통합 및 분석 중...")
 def get_processed_data():
     df_hist = load_historical_data()
     df_api, api_msg = fetch_api_data()
 
-    # 💡 [핵심 복구] V19의 완벽했던 퍼즐 맞추기 로직 복구 (어설픈 중복 제거 로직 완전 삭제!)
-    # 이미 fetch_api_data()에서 20일 이전 데이터를 차단했기 때문에 그냥 더하기만 하면 됨!
-    if not df_api.empty:
+    # 데이터 타입 강제 통일 (문자열로 통일해야 파이썬이 같은 번호로 인식함)
+    if not df_hist.empty: df_hist['납품요구번호'] = df_hist['납품요구번호'].astype(str).str.strip()
+    if not df_api.empty: df_api['납품요구번호'] = df_api['납품요구번호'].astype(str).str.strip()
+
+    # 엑셀 + API 합치기
+    if not df_api.empty and not df_hist.empty:
         df_total = pd.concat([df_hist, df_api], ignore_index=True)
+    elif not df_api.empty:
+        df_total = df_api.copy()
     else:
         df_total = df_hist.copy()
 
-    # 37개 쓰레기 품목 원천 차단
+    # 💡 [강력 중복 제거] data02.csv와 data02.cvs가 같이 있어서 발생하는 2배 뻥튀기 현상 원천 차단!
+    if not df_total.empty:
+        df_total = df_total.drop_duplicates(subset=['납품요구번호', '물품분류명', '금액'], keep='last')
+
+    # 💡 37개 쓰레기 품목 차단 필터
     if not df_total.empty and '물품분류명' in df_total.columns:
         pattern = '|'.join(EXCLUDE_ITEMS)
         df_total = df_total[~df_total['물품분류명'].astype(str).str.contains(pattern, na=False, regex=True)]
@@ -209,7 +227,7 @@ def get_processed_data():
 df_total, api_msg = get_processed_data()
 
 # --- 6. UI 및 새로고침 버튼 ---
-st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v21.0 (금액정상+초고속판)</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v22.0 (숫자 완벽 검증판)</div>", unsafe_allow_html=True)
 
 col_head1, col_head2 = st.columns([5, 1])
 with col_head1:
@@ -344,7 +362,6 @@ else:
         with pd.ExcelWriter(xlsx, engine='xlsxwriter') as wr:
             final.to_excel(wr, index=False, sheet_name='실적랭킹')
         st.download_button("💾 엑셀 다운로드", xlsx.getvalue(), f'조달랭킹_{dl_key}_{get_now_kst().strftime("%Y%m%d")}.xlsx', key=dl_key)
-
 
     st.subheader("⚙️ 랭킹 보드 컨트롤")
     ctrl_col_a, ctrl_col_b = st.columns(2)
