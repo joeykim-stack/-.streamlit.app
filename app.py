@@ -7,8 +7,8 @@ import plotly.express as px
 import plotly.graph_objects as go
 from io import BytesIO
 import time
-import urllib.parse
 import re
+import urllib.parse
 
 # --- 1. 기본 설정 및 KST 시계 ---
 st.set_page_config(page_title="조달청 실적 분석 대시보드", layout="wide")
@@ -24,7 +24,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- 2. 분석 대상 업체 및 포함 세부품명(화이트리스트) 세팅 ---
+# --- 2. 분석 대상 업체 및 화이트리스트 세팅 ---
 TARGET_COMPANIES = [
     "주식회사 티제이원", "주식회사 파로스", "주식회사 포딕스시스템", "주식회사 세오", 
     "주식회사 펜타게이트", "주식회사 홍석", "주식회사 솔디아", "주식회사 정현씨앤씨", "주식회사 디라직", 
@@ -47,7 +47,7 @@ def normalize_corp_name(name):
 
 TARGET_MAP = {normalize_corp_name(comp): comp for comp in TARGET_COMPANIES}
 
-# 사용자가 지정한 '반드시 포함할' 120개 타겟 리스트 (중복 자동 제거)
+# 사용자가 지정한 '반드시 포함할' 120개 타겟 리스트
 INCLUDE_ITEMS_RAW = [
     "CCTV카메라용렌즈", "IP전화기", "PA용스피커", "SSD저장장치", "게이트웨이", "경광등", 
     "광분배함", "광송수신기", "광송수신모듈", "광점퍼코드", "교통관제시스템", "그래픽용어댑터", 
@@ -81,11 +81,11 @@ INCLUDE_ITEMS_RAW = [
     "접지봉", "접지판", "정보통신공사", "정보화교육서비스", "제어케이블", "철근콘크리트공사", 
     "카메라브래킷", "컴퓨터서버", "토공사", "통신용변조기", "포장공사", "폴리에틸렌전선관", "풀박스"
 ]
-INCLUDE_ITEMS = list(set(INCLUDE_ITEMS_RAW))
+INCLUDE_ITEMS = [x.strip() for x in list(set(INCLUDE_ITEMS_RAW)) if x.strip()]
 
-# --- 3. 로컬 데이터 로드 (💡 파일 튕김 에러 완벽 해결!) ---
+# --- 3. 로컬 데이터 로드 (💡 지능형 금액 파서 탑재) ---
 def load_historical_data_raw():
-    file_month_map = {'data.csv': '1월', 'data02.csv': '2월', 'data02.cvs': '2월', 'data03.csv': '3월', 'data04.csv': '4월'}
+    file_month_map = {'data.csv': '1월', 'data02.csv': '2월', 'data03.csv': '3월', 'data04.csv': '4월'}
     dfs = []
     for file, target_month in file_month_map.items():
         try:
@@ -112,12 +112,21 @@ def load_historical_data_raw():
 
             df[req_col] = df[req_col].fillna('').astype(str).str.replace('nan', '', regex=False).str.replace(r'\.0$', '', regex=True).str.strip()
 
-            # 💡 [V31의 완벽했던 금액 추출 로직 100% 복원] (파일 증발 0%)
-            if '납품증감금액' in df.columns: df['금액'] = pd.to_numeric(df['납품증감금액'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
-            elif '합계납품증감금액' in df.columns: df['금액'] = pd.to_numeric(df['합계납품증감금액'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
-            elif '납품요구금액' in df.columns: df['금액'] = pd.to_numeric(df['납품요구금액'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
-            elif '금액' in df.columns: df['금액'] = pd.to_numeric(df['금액'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
-            else: continue
+            # 💡 [슈퍼 금액 파서] KeyError 방지 + 0원 덮어쓰기 방지 완벽 구현
+            df['금액'] = 0.0
+            
+            # 1. 기본 금액 세팅 (요구금액)
+            for col in ['납품요구금액', '금액', '납품금액']:
+                if col in df.columns:
+                    base_amt = pd.to_numeric(df[col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+                    df['금액'] = df['금액'].where(df['금액'] != 0, base_amt)
+            
+            # 2. 증감금액이 0원이 아닌 경우에만 진짜 수정 계약으로 보고 덮어쓰기! (인텔리빅스 80억 보호)
+            for col in ['납품증감금액', '합계납품증감금액']:
+                if col in df.columns:
+                    mod_amt = pd.to_numeric(df[col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+                    mask = mod_amt != 0
+                    df.loc[mask, '금액'] = mod_amt[mask]
             
             temp_df = df[['업체명', target_item_col, '금액', req_col]].copy()
             temp_df.columns = ['업체명', '세부품명', '금액', '납품요구번호']
@@ -136,7 +145,7 @@ def load_historical_data_raw():
     if not result_df.empty: result_df = result_df.drop_duplicates()
     return result_df
 
-# --- 4. 실시간 API 수집 (💡 새 인증키 적용 + 타임밤 제거) ---
+# --- 4. 실시간 API 수집 ---
 def fetch_api_data_raw():
     now = get_now_kst()
     try:
@@ -186,7 +195,6 @@ def fetch_api_data_raw():
                 target_date = rcpt_date if rcpt_date else req_date
                 date_clean = target_date.replace('-', '').replace('.', '').strip()[:8]
                 
-                # 4월 20일 이전 실적은 스킵 (5월 데이터는 무사통과)
                 if date_clean and date_clean < cutoff_date: continue
                 
                 cntrct_stle = item.findtext('cntrctCnclsStleNm', '')
@@ -198,7 +206,6 @@ def fetch_api_data_raw():
                 
                 if norm_corp in TARGET_MAP:
                     req_no = item.findtext('dlvrReqNo', '').strip()
-                    
                     item_name = item.findtext('dtilPrdctClsfcNm', '')
                     if not item_name: item_name = item.findtext('prdctClsfcNm', '')
                     
@@ -218,12 +225,12 @@ def fetch_api_data_raw():
             page_no += 1
 
         if all_new_data:
-            return pd.DataFrame(all_new_data), f"🟢 신규 스캔 완료 -> 4월 20일 이후 실적 {added_count}건 수집!"
-        return pd.DataFrame(), f"🔵 스캔 완료 (4월 20일 이후 타겟 실적 없음)"
+            return pd.DataFrame(all_new_data), f"🟢 4/20 이후 실적 {added_count}건 수집!"
+        return pd.DataFrame(), f"🔵 스캔 완료 (4/20 이후 타겟 실적 없음)"
         
     except Exception: return pd.DataFrame(), f"⚠️ 파싱 에러"
 
-# --- 5. 데이터 통합 및 정제 (💡 지능형 화이트리스트 적용) ---
+# --- 5. 데이터 통합 및 정제 (💡 진짜 CONTAINS 필터 적용) ---
 def get_processed_data_raw():
     df_hist = load_historical_data_raw()
     df_api, api_msg = fetch_api_data_raw()
@@ -243,21 +250,19 @@ def get_processed_data_raw():
     else:
         df_total = df_hist.copy()
 
-    # 💡 [인텔리빅스 80억 구출용 지능형 화이트리스트 방어막] 
-    # 리스트에 있는 단어가 엑셀 '세부품명'에 "포함(contains)"만 되어도 100% 살려둔다.
+    # 💡 [진짜 Contains 필터] isin()이 아니라 str.contains()로 리스트 단어 포함 여부 스캔!
     if not df_total.empty and '세부품명' in df_total.columns:
-        escaped_items = [re.escape(x.strip()) for x in INCLUDE_ITEMS]
+        escaped_items = [re.escape(x) for x in INCLUDE_ITEMS]
         pattern = '|'.join(escaped_items)
-        # na=False 로 에러 방지, case=False 로 대소문자 무시
+        # '영상감시장치(지능형)' 도 '영상감시장치'가 리스트에 있으므로 무사통과!
         df_total = df_total[df_total['세부품명'].astype(str).str.contains(pattern, na=False, case=False)]
 
     return df_total, api_msg
 
-# 매번 하드디스크/API에서 새로 로드 (캐시 제로)
 df_total, api_msg = get_processed_data_raw()
 
 # --- 6. UI 및 새로고침 버튼 ---
-st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v42.0 (화이트리스트 + V31 엔진)</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='main-title'>🏆 조달청 실적 분석 v43.0 (Contains 필터 + 무결점 파서)</div>", unsafe_allow_html=True)
 
 col_head1, col_head2 = st.columns([5, 1])
 with col_head1:
@@ -299,7 +304,7 @@ else:
     t_cnt = df_f['납품요구번호'].nunique()
     t_amt = df_f['금액'].sum()
     
-    # 인텔리빅스 80억 확인용 개별 지표 추가
+    # 💡 인텔리빅스 80억 확인용
     intellivix_amt = df_f[df_f['업체명'] == '주식회사 인텔리빅스']['금액'].sum()
 
     c1, c2, c3 = st.columns(3)
