@@ -7,7 +7,6 @@ import plotly.express as px
 import plotly.graph_objects as go
 from io import BytesIO
 import time
-import urllib.parse
 
 # --- 1. 기본 설정 및 KST 시계 ---
 st.set_page_config(page_title="조달청 실적 분석 대시보드", layout="wide")
@@ -23,7 +22,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- 2. 분석 대상 업체 및 💡 [신규] 포함 세부품명(화이트리스트) 세팅 ---
+# --- 2. 분석 대상 업체 및 포함 세부품명(화이트리스트) 세팅 ---
 TARGET_COMPANIES = [
     "주식회사 티제이원", "주식회사 파로스", "주식회사 포딕스시스템", "주식회사 세오", 
     "주식회사 펜타게이트", "주식회사 홍석", "주식회사 솔디아", "주식회사 정현씨앤씨", "주식회사 디라직", 
@@ -46,7 +45,7 @@ def normalize_corp_name(name):
 
 TARGET_MAP = {normalize_corp_name(comp): comp for comp in TARGET_COMPANIES}
 
-# 💡 사용자가 지정한 '반드시 포함할' 세부품명 리스트 (중복 알아서 제거됨)
+# 사용자가 지정한 '반드시 포함할' 세부품명 리스트 (중복 자동 제거)
 INCLUDE_ITEMS_RAW = [
     "CCTV카메라용렌즈", "IP전화기", "PA용스피커", "SSD저장장치", "게이트웨이", "경광등", 
     "광분배함", "광송수신기", "광송수신모듈", "광점퍼코드", "교통관제시스템", "그래픽용어댑터", 
@@ -80,11 +79,11 @@ INCLUDE_ITEMS_RAW = [
     "접지봉", "접지판", "정보통신공사", "정보화교육서비스", "제어케이블", "철근콘크리트공사", 
     "카메라브래킷", "컴퓨터서버", "토공사", "통신용변조기", "포장공사", "폴리에틸렌전선관", "풀박스"
 ]
-INCLUDE_ITEMS = list(set(INCLUDE_ITEMS_RAW)) # 리스트 내 중복 요소 완벽 제거
+INCLUDE_ITEMS = list(set(INCLUDE_ITEMS_RAW))
 
-# --- 3. 로컬 데이터 로드 (💡 V31 베이스 + 세부품명 추출) ---
+# --- 3. 로컬 데이터 로드 (캐시 제거) ---
 def load_historical_data_raw():
-    file_month_map = {'data.csv': '1월', 'data02.csv': '2월', 'data02.cvs': '2월', 'data03.csv': '3월', 'data04.csv': '4월'}
+    file_month_map = {'data.csv': '1월', 'data02.csv': '2월', 'data03.csv': '3월', 'data04.csv': '4월'}
     dfs = []
     for file, target_month in file_month_map.items():
         try:
@@ -100,7 +99,7 @@ def load_historical_data_raw():
             df.rename(columns=lambda x: str(x).strip(), inplace=True)
             if '계약업체명' in df.columns and '업체명' not in df.columns: df.rename(columns={'계약업체명': '업체명'}, inplace=True)
             
-            # 💡 [핵심] '세부품명' 최우선 추출 (없으면 품명으로 대체)
+            # '세부품명' 최우선 추출
             target_item_col = None
             if '세부품명' in df.columns: target_item_col = '세부품명'
             elif '물품분류명' in df.columns: target_item_col = '물품분류명'
@@ -111,7 +110,6 @@ def load_historical_data_raw():
 
             df[req_col] = df[req_col].fillna('').astype(str).str.replace('nan', '', regex=False).str.replace(r'\.0$', '', regex=True).str.strip()
 
-            # 💡 V19 순정 엔진: 납품증감금액 최우선
             if '납품증감금액' in df.columns: df['금액'] = pd.to_numeric(df['납품증감금액'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
             elif '합계납품증감금액' in df.columns: df['금액'] = pd.to_numeric(df['합계납품증감금액'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
             elif '납품요구금액' in df.columns: df['금액'] = pd.to_numeric(df['납품요구금액'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
@@ -135,17 +133,20 @@ def load_historical_data_raw():
     if not result_df.empty: result_df = result_df.drop_duplicates()
     return result_df
 
-# --- 4. 실시간 API 수집 (💡 세부품명 추출 반영) ---
+# --- 4. 실시간 API 수집 (💡 타임밤 버그 픽스!) ---
 def fetch_api_data_raw():
     now = get_now_kst()
     try:
+        import urllib.parse
         RAW_KEY = "c1b379f7734c7d624ddefea07510eae71b6e12c5fb89970319d76c5ae8db5248"
         API_KEY = urllib.parse.unquote(RAW_KEY)
         URL = "http://apis.data.go.kr/1230000/at/ShoppingMallPrdctInfoService/getDlvrReqInfoList"
         
-        bgn_date = now.strftime('%Y%m') + '01'
+        # 💡 [핵심 버그 수정] 달력이 5월로 넘어가도 무조건 "4월 1일 ~ 현재" 조회
+        bgn_date = "20260401"
         end_date = now.strftime('%Y%m%d')
-        cutoff_date = now.strftime('%Y%m') + '20'
+        # 💡 무조건 "4월 20일"을 컷오프 기준으로 하드코딩
+        cutoff_date = "20260420"
         
         all_new_data = []
         page_no = 1
@@ -184,6 +185,7 @@ def fetch_api_data_raw():
                 target_date = rcpt_date if rcpt_date else req_date
                 date_clean = target_date.replace('-', '').replace('.', '').strip()[:8]
                 
+                # 4월 20일 이전 실적은 스킵! (5월 데이터는 무사통과)
                 if date_clean and date_clean < cutoff_date: continue
                 
                 cntrct_stle = item.findtext('cntrctCnclsStleNm', '')
@@ -196,16 +198,18 @@ def fetch_api_data_raw():
                 if norm_corp in TARGET_MAP:
                     req_no = item.findtext('dlvrReqNo', '').strip()
                     
-                    # 💡 [핵심] API에서도 '세부품명' (dtilPrdctClsfcNm)을 최우선으로 가져옴
                     item_name = item.findtext('dtilPrdctClsfcNm', '')
                     if not item_name: item_name = item.findtext('prdctClsfcNm', '')
+                    
+                    # 데이터가 5월이면 "5월"로 동적 분류
+                    api_month_str = f"{int(date_clean[4:6])}월"
                     
                     all_new_data.append({
                         '업체명': TARGET_MAP[norm_corp], 
                         '세부품명': item_name, 
                         '금액': float(item.findtext('dlvrReqAmt', 0)), 
                         '납품요구번호': req_no if req_no else f'API_{time.time()}', 
-                        '월': '4월',
+                        '월': api_month_str,
                         'MAS여부': 'Y' 
                     })
                     added_count += 1
@@ -214,8 +218,8 @@ def fetch_api_data_raw():
             page_no += 1
 
         if all_new_data:
-            return pd.DataFrame(all_new_data), f"🟢 4월 스캔 완료 -> 20일 이후 실적 {added_count}건 수집!"
-        return pd.DataFrame(), f"🔵 4월 스캔 완료 (20일 이후 타겟 실적 없음)"
+            return pd.DataFrame(all_new_data), f"🟢 신규 스캔 완료 -> 4월 20일 이후 실적 {added_count}건 수집!"
+        return pd.DataFrame(), f"🔵 스캔 완료 (4월 20일 이후 타겟 실적 없음)"
         
     except Exception: return pd.DataFrame(), f"⚠️ 파싱 에러"
 
@@ -239,24 +243,23 @@ def get_processed_data_raw():
     else:
         df_total = df_hist.copy()
 
-    # 💡 [필터링의 혁명] 제외(Exclude) 대신 포함(Include) 화이트리스트 사용!
+    # 💡 [화이트리스트 방어막] 우리가 지정한 세부품명만 100% 살려둔다.
     if not df_total.empty and '세부품명' in df_total.columns:
-        # 글자 앞뒤 공백을 자르고, 우리가 지정한 리스트에 정확히 존재하는 데이터만 통과시킴
         df_total['세부품명_clean'] = df_total['세부품명'].astype(str).str.strip()
         df_total = df_total[df_total['세부품명_clean'].isin(INCLUDE_ITEMS)]
-        df_total = df_total.drop(columns=['세부품명_clean']) # 임시 컬럼 삭제
+        df_total = df_total.drop(columns=['세부품명_clean'])
 
     return df_total, api_msg
 
-# 매번 하드디스크/API에서 새로 로드
+# 매번 하드디스크/API에서 새로 로드 (캐시 제로)
 df_total, api_msg = get_processed_data_raw()
 
 # --- 6. UI 및 새로고침 버튼 ---
-st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v38.0 (화이트리스트 기반)</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v39.0 (날짜 버그 픽스)</div>", unsafe_allow_html=True)
 
 col_head1, col_head2 = st.columns([5, 1])
 with col_head1:
-    st.markdown(f"<div class='update-time'>🕒 상태: {api_msg} (캐시 제로/세부품명 필터 적용)</div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='update-time'>🕒 상태: {api_msg}</div>", unsafe_allow_html=True)
 with col_head2:
     if st.button("🔄 즉시 새로고침", use_container_width=True):
         st.rerun()
@@ -282,11 +285,13 @@ with st.sidebar:
             if cb_key not in st.session_state: st.session_state[cb_key] = True
             if st.checkbox(item, key=cb_key): selected_items.append(item)
 
-# --- 8. 메인 화면 (요약 & 차트) ---
+# --- 8. 메인 화면 ---
 if not selected_items:
     st.info("👈 왼쪽 사이드바에서 분석할 세부품명을 1개 이상 선택해주세요.")
 else:
     df_f = df_total[df_total['세부품명'].isin(selected_items)].copy()
+    
+    # 5월 데이터도 들어올 수 있으므로 분기 로직 업데이트
     df_f['분기'] = df_f['월'].apply(lambda x: '1분기' if x in ['1월', '2월', '3월'] else '2분기')
     df_f['총계'] = '총합계'
     
@@ -304,8 +309,14 @@ else:
         trend_view = st.radio("조회 기준", ["월별", "분기별", "총합계"], horizontal=True, label_visibility="collapsed")
         time_col = '월' if trend_view == '월별' else ('분기' if trend_view == '분기별' else '총계')
         m_df = df_f.groupby(time_col).agg(금액=('금액', 'sum'), 건수=('납품요구번호', 'nunique')).reset_index()
-        if trend_view == '월별': m_df = m_df.sort_values('월')
-        elif trend_view == '분기별': m_df = m_df.sort_values('분기')
+        
+        # 월별 소팅 로직 (1월, 2월, 3월, 4월, 5월 정렬)
+        if trend_view == '월별':
+            m_df['sort_key'] = m_df['월'].str.replace('월', '').astype(int)
+            m_df = m_df.sort_values('sort_key').drop(columns=['sort_key'])
+        elif trend_view == '분기별': 
+            m_df = m_df.sort_values('분기')
+            
         fig = go.Figure()
         fig.add_trace(go.Bar(x=m_df[time_col], y=m_df['금액'], name='매출액', marker_color='#3b82f6', yaxis='y1'))
         fig.add_trace(go.Scatter(x=m_df[time_col], y=m_df['건수'], name='건수', mode='lines+markers+text', text=m_df['건수'], textposition='top center', marker_color='#ef4444', yaxis='y2'))
@@ -314,7 +325,12 @@ else:
         
     with col_b:
         st.subheader("🍩 시장 점유율")
-        pie_view = st.selectbox("분석 기간 선택", ["총합계 (전체)", "1분기 (1~3월)", "2분기 (4월~)", "1월", "2월", "3월", "4월"], label_visibility="collapsed")
+        
+        # 파이 차트 보기 동적 옵션 생성 (데이터에 존재하는 월만)
+        avail_months = sorted(df_f['월'].unique(), key=lambda x: int(x.replace('월', '')))
+        pie_options = ["총합계 (전체)", "1분기 (1~3월)", "2분기 (4월~)"] + avail_months
+        pie_view = st.selectbox("분석 기간 선택", pie_options, label_visibility="collapsed")
+        
         if pie_view == "총합계 (전체)": pie_df = df_f
         elif "1분기" in pie_view: pie_df = df_f[df_f['분기'] == '1분기']
         elif "2분기" in pie_view: pie_df = df_f[df_f['분기'] == '2분기']
@@ -335,29 +351,38 @@ else:
         
         ctrl_col1, ctrl_col2 = st.columns([2.4, 1])
         
+        # 동적 월별 피벗 테이블
+        all_months = sorted(df_data['월'].unique(), key=lambda x: int(x.replace('월', '')))
+        if not all_months: return st.warning("해당 조건의 실적이 없습니다.")
+            
         p_amt = pd.pivot_table(df_data, values='금액', index='업체명', columns='월', aggfunc='sum', fill_value=0).reset_index()
-        for m in ['1월', '2월', '3월', '4월']:
-            if m not in p_amt.columns: p_amt[m] = 0
-        p_amt['1분기 합계'] = p_amt['1월'] + p_amt['2월'] + p_amt['3월']
-        p_amt['누적 합계'] = p_amt['1분기 합계'] + p_amt['4월']
-        
         p_cnt = pd.pivot_table(df_data, values='납품요구번호', index='업체명', columns='월', aggfunc='nunique', fill_value=0).reset_index()
-        for m in ['1월', '2월', '3월', '4월']:
+        
+        for m in all_months:
+            if m not in p_amt.columns: p_amt[m] = 0
             if m not in p_cnt.columns: p_cnt[m] = 0
-        p_cnt['1분기(건)'] = p_cnt['1월'] + p_cnt['2월'] + p_cnt['3월']
-        p_cnt['누적(건)'] = p_cnt['1분기(건)'] + p_cnt['4월']
-        p_cnt.rename(columns={'1월':'1월(건)', '2월':'2월(건)', '3월':'3월(건)', '4월':'4월(건)'}, inplace=True)
+            
+        q1_months = [m for m in all_months if m in ['1월', '2월', '3월']]
+        q2_months = [m for m in all_months if m in ['4월', '5월', '6월']]
+        
+        p_amt['1분기 합계'] = p_amt[q1_months].sum(axis=1) if q1_months else 0
+        p_amt['누적 합계'] = p_amt[all_months].sum(axis=1)
+        
+        p_cnt['1분기(건)'] = p_cnt[q1_months].sum(axis=1) if q1_months else 0
+        p_cnt['누적(건)'] = p_cnt[all_months].sum(axis=1)
+        
+        p_cnt.rename(columns={m: f'{m}(건)' for m in all_months}, inplace=True)
         
         final = pd.merge(p_amt, p_cnt, on='업체명', how='outer').fillna(0)
         
-        if show_count_col:
-            disp_cols = ['업체명', '1월', '1월(건)', '2월', '2월(건)', '3월', '3월(건)', '1분기 합계', '1분기(건)', '4월', '4월(건)', '누적 합계', '누적(건)']
-        else:
-            disp_cols = ['업체명', '1월', '2월', '3월', '1분기 합계', '4월', '누적 합계']
-            
-        if final.empty:
-            st.warning("해당 조건의 실적이 없습니다.")
-            return
+        disp_cols = ['업체명']
+        for m in all_months:
+            disp_cols.append(m)
+            if show_count_col: disp_cols.append(f'{m}(건)')
+        disp_cols.append('1분기 합계')
+        if show_count_col: disp_cols.append('1분기(건)')
+        disp_cols.append('누적 합계')
+        if show_count_col: disp_cols.append('누적(건)')
             
         final = final[disp_cols]
         
@@ -406,18 +431,6 @@ else:
         sort_key='sort_total', 
         dl_key='dl_total', 
         cmap_color='Blues'
-    )
-
-    st.markdown("<br><br>", unsafe_allow_html=True)
-
-    board_df_mas = df_f[df_f['MAS여부'] == 'Y'].copy()
-    render_ranking_board(
-        df_data=board_df_mas, 
-        title="🏢 MAS 계약 전용 실적 랭킹", 
-        show_count_col=show_cnt, 
-        sort_key='sort_mas', 
-        dl_key='dl_mas', 
-        cmap_color='Greens'
     )
 
 st.markdown("<br><center style='color:gray;'>Copyright(C) 2026 Joey Kim. Data from Public Data Portal.</center>", unsafe_allow_html=True)
