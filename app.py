@@ -83,9 +83,9 @@ INCLUDE_ITEMS_RAW = [
 ]
 INCLUDE_ITEMS = [x.strip() for x in list(set(INCLUDE_ITEMS_RAW)) if x.strip()]
 
-# --- 3. 로컬 데이터 로드 (💡 지능형 금액 파서 탑재) ---
+# --- 3. 로컬 데이터 로드 (💡 자폭 버그 완벽 해결!) ---
 def load_historical_data_raw():
-    file_month_map = {'data.csv': '1월', 'data02.csv': '2월', 'data03.csv': '3월', 'data04.csv': '4월'}
+    file_month_map = {'data.csv': '1월', 'data02.csv': '2월', 'data02.cvs': '2월', 'data03.csv': '3월', 'data04.csv': '4월'}
     dfs = []
     for file, target_month in file_month_map.items():
         try:
@@ -101,7 +101,6 @@ def load_historical_data_raw():
             df.rename(columns=lambda x: str(x).strip(), inplace=True)
             if '계약업체명' in df.columns and '업체명' not in df.columns: df.rename(columns={'계약업체명': '업체명'}, inplace=True)
             
-            # '세부품명' 최우선 추출
             target_item_col = None
             if '세부품명' in df.columns: target_item_col = '세부품명'
             elif '물품분류명' in df.columns: target_item_col = '물품분류명'
@@ -112,23 +111,25 @@ def load_historical_data_raw():
 
             df[req_col] = df[req_col].fillna('').astype(str).str.replace('nan', '', regex=False).str.replace(r'\.0$', '', regex=True).str.strip()
 
-            # 💡 [슈퍼 금액 파서] KeyError 방지 + 0원 덮어쓰기 방지 완벽 구현
-            df['금액'] = 0.0
+            # 💡 [슈퍼 금액 파서] 원본 컬럼(df['금액'])을 절대 덮어쓰지 않음! 'calc_amt'라는 임시 변수 사용
+            calc_amt = pd.Series(0.0, index=df.index)
             
-            # 1. 기본 금액 세팅 (요구금액)
+            # 1. 기본 금액 세팅
             for col in ['납품요구금액', '금액', '납품금액']:
                 if col in df.columns:
                     base_amt = pd.to_numeric(df[col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
-                    df['금액'] = df['금액'].where(df['금액'] != 0, base_amt)
+                    calc_amt = calc_amt.where(calc_amt != 0, base_amt)
             
-            # 2. 증감금액이 0원이 아닌 경우에만 진짜 수정 계약으로 보고 덮어쓰기! (인텔리빅스 80억 보호)
+            # 2. 증감금액 덮어쓰기 (진짜 0원이 아닐 때만 덮어씀 -> 인텔리빅스 80억 보호)
             for col in ['납품증감금액', '합계납품증감금액']:
                 if col in df.columns:
                     mod_amt = pd.to_numeric(df[col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
                     mask = mod_amt != 0
-                    df.loc[mask, '금액'] = mod_amt[mask]
+                    calc_amt.loc[mask] = mod_amt[mask]
             
-            temp_df = df[['업체명', target_item_col, '금액', req_col]].copy()
+            df['최종파싱금액'] = calc_amt
+            
+            temp_df = df[['업체명', target_item_col, '최종파싱금액', req_col]].copy()
             temp_df.columns = ['업체명', '세부품명', '금액', '납품요구번호']
             temp_df['월'] = target_month
             
@@ -211,10 +212,14 @@ def fetch_api_data_raw():
                     
                     api_month_str = f"{int(date_clean[4:6])}월"
                     
+                    # 💡 빈 문자열("") 에러 방지 처리
+                    amt_str = item.findtext('dlvrReqAmt', '0')
+                    if not amt_str or str(amt_str).strip() == '': amt_str = '0'
+                    
                     all_new_data.append({
                         '업체명': TARGET_MAP[norm_corp], 
                         '세부품명': item_name, 
-                        '금액': float(item.findtext('dlvrReqAmt', 0)), 
+                        '금액': float(amt_str), 
                         '납품요구번호': req_no if req_no else f'API_{time.time()}', 
                         '월': api_month_str,
                         'MAS여부': 'Y' 
@@ -230,7 +235,7 @@ def fetch_api_data_raw():
         
     except Exception: return pd.DataFrame(), f"⚠️ 파싱 에러"
 
-# --- 5. 데이터 통합 및 정제 (💡 진짜 CONTAINS 필터 적용) ---
+# --- 5. 데이터 통합 및 정제 (💡 지능형 화이트리스트 적용) ---
 def get_processed_data_raw():
     df_hist = load_historical_data_raw()
     df_api, api_msg = fetch_api_data_raw()
@@ -250,11 +255,10 @@ def get_processed_data_raw():
     else:
         df_total = df_hist.copy()
 
-    # 💡 [진짜 Contains 필터] isin()이 아니라 str.contains()로 리스트 단어 포함 여부 스캔!
+    # 💡 [진짜 Contains 필터] 
     if not df_total.empty and '세부품명' in df_total.columns:
         escaped_items = [re.escape(x) for x in INCLUDE_ITEMS]
         pattern = '|'.join(escaped_items)
-        # '영상감시장치(지능형)' 도 '영상감시장치'가 리스트에 있으므로 무사통과!
         df_total = df_total[df_total['세부품명'].astype(str).str.contains(pattern, na=False, case=False)]
 
     return df_total, api_msg
@@ -262,7 +266,7 @@ def get_processed_data_raw():
 df_total, api_msg = get_processed_data_raw()
 
 # --- 6. UI 및 새로고침 버튼 ---
-st.markdown(f"<div class='main-title'>🏆 조달청 실적 분석 v43.0 (Contains 필터 + 무결점 파서)</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='main-title'>🏆 조달청 실적 분석 v44.0 (금액 오류 완전 픽스)</div>", unsafe_allow_html=True)
 
 col_head1, col_head2 = st.columns([5, 1])
 with col_head1:
