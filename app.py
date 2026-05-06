@@ -230,8 +230,8 @@ def get_processed_data_raw():
 
 df_total, api_msg = get_processed_data_raw()
 
-# --- 6. UI 및 새로고침 버튼 (V31 레이아웃 완벽 복원) ---
-st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v47.0 (클래식 UI 롤백판)</div>", unsafe_allow_html=True)
+# --- 6. UI 및 새로고침 버튼 ---
+st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v48.0 (1년치 풀-스케일 템플릿)</div>", unsafe_allow_html=True)
 
 col_head1, col_head2 = st.columns([5, 1])
 with col_head1:
@@ -266,7 +266,16 @@ if not selected_items:
     st.info("👈 왼쪽 사이드바에서 분석할 품목을 1개 이상 선택해주세요.")
 else:
     df_f = df_total[df_total['물품분류명'].isin(selected_items)].copy()
-    df_f['분기'] = df_f['월'].apply(lambda x: '1분기' if x in ['1월', '2월', '3월'] else '2분기')
+    
+    # 💡 [분기 자동 계산기] 1년 내내 대응 가능
+    def get_quarter(month_str):
+        m = int(month_str.replace('월', ''))
+        if m <= 3: return '1분기'
+        elif m <= 6: return '2분기'
+        elif m <= 9: return '3분기'
+        else: return '4분기'
+        
+    df_f['분기'] = df_f['월'].apply(get_quarter)
     df_f['총계'] = '총합계'
     
     t_cnt = df_f['납품요구번호'].nunique()
@@ -299,12 +308,11 @@ else:
     with col_b:
         st.subheader("🍩 시장 점유율")
         avail_months = sorted(df_f['월'].unique(), key=lambda x: int(x.replace('월', '')))
-        pie_options = ["총합계 (전체)", "1분기 (1~3월)", "2분기 (4월~)"] + avail_months
+        pie_options = ["총합계 (전체)", "1분기", "2분기", "3분기", "4분기"] + avail_months
         pie_view = st.selectbox("분석 기간 선택", pie_options, label_visibility="collapsed")
         
         if pie_view == "총합계 (전체)": pie_df = df_f
-        elif "1분기" in pie_view: pie_df = df_f[df_f['분기'] == '1분기']
-        elif "2분기" in pie_view: pie_df = df_f[df_f['분기'] == '2분기']
+        elif "분기" in pie_view: pie_df = df_f[df_f['분기'] == pie_view]
         else: pie_df = df_f[df_f['월'] == pie_view]
         
         if pie_df.empty: st.info(f"선택하신 '{pie_view}' 기간의 실적 데이터가 없습니다.")
@@ -317,59 +325,88 @@ else:
 
     st.markdown("---")
 
+    # 💡 [핵심] 1년치 풀-스케일 랭킹 보드 렌더링 함수
     def render_ranking_board(df_data, title, show_count_col, sort_key, dl_key, cmap_color='Blues'):
         st.subheader(title)
-        
         ctrl_col1, ctrl_col2 = st.columns([2.4, 1])
         
-        all_months = sorted(df_data['월'].unique(), key=lambda x: int(x.replace('월', '')))
-        if not all_months: return st.warning("해당 조건의 실적이 없습니다.")
+        if df_data.empty: return st.warning("해당 조건의 실적이 없습니다.")
             
         p_amt = pd.pivot_table(df_data, values='금액', index='업체명', columns='월', aggfunc='sum', fill_value=0).reset_index()
         p_cnt = pd.pivot_table(df_data, values='납품요구번호', index='업체명', columns='월', aggfunc='nunique', fill_value=0).reset_index()
         
+        # 1월~12월 고정 세팅 (안 들어온 달은 0으로 채움)
+        all_months = [f"{m}월" for m in range(1, 13)]
         for m in all_months:
             if m not in p_amt.columns: p_amt[m] = 0
             if m not in p_cnt.columns: p_cnt[m] = 0
             
-        q1_months = [m for m in all_months if m in ['1월', '2월', '3월']]
+        q1_months = ['1월', '2월', '3월']
+        q2_months = ['4월', '5월', '6월']
+        q3_months = ['7월', '8월', '9월']
+        q4_months = ['10월', '11월', '12월']
         
-        p_amt['1분기 합계'] = p_amt[q1_months].sum(axis=1) if q1_months else 0
-        p_amt['누적 합계'] = p_amt[all_months].sum(axis=1)
+        # 분기별, 전체 합계 계산
+        p_amt['1분기 합계'] = p_amt[q1_months].sum(axis=1)
+        p_amt['2분기 합계'] = p_amt[q2_months].sum(axis=1)
+        p_amt['3분기 합계'] = p_amt[q3_months].sum(axis=1)
+        p_amt['4분기 합계'] = p_amt[q4_months].sum(axis=1)
+        p_amt['전체 합계'] = p_amt[all_months].sum(axis=1)
         
-        p_cnt['1분기(건)'] = p_cnt[q1_months].sum(axis=1) if q1_months else 0
-        p_cnt['누적(건)'] = p_cnt[all_months].sum(axis=1)
+        p_cnt['1분기(건)'] = p_cnt[q1_months].sum(axis=1)
+        p_cnt['2분기(건)'] = p_cnt[q2_months].sum(axis=1)
+        p_cnt['3분기(건)'] = p_cnt[q3_months].sum(axis=1)
+        p_cnt['4분기(건)'] = p_cnt[q4_months].sum(axis=1)
+        p_cnt['전체 합계(건)'] = p_cnt[all_months].sum(axis=1)
         
         p_cnt.rename(columns={m: f'{m}(건)' for m in all_months}, inplace=True)
         
         final = pd.merge(p_amt, p_cnt, on='업체명', how='outer').fillna(0)
         
+        # 컬럼 순서 (네가 요청한 완벽한 템플릿)
         disp_cols = ['업체명']
-        for m in all_months:
-            disp_cols.append(m)
-            if show_count_col: disp_cols.append(f'{m}(건)')
-        disp_cols.append('1분기 합계')
-        if show_count_col: disp_cols.append('1분기(건)')
-        disp_cols.append('누적 합계')
-        if show_count_col: disp_cols.append('누적(건)')
+        quarters = [
+            (q1_months, '1분기 합계', '1분기(건)'),
+            (q2_months, '2분기 합계', '2분기(건)'),
+            (q3_months, '3분기 합계', '3분기(건)'),
+            (q4_months, '4분기 합계', '4분기(건)')
+        ]
+        
+        for q_months, q_amt_name, q_cnt_name in quarters:
+            for m in q_months:
+                disp_cols.append(m)
+                if show_count_col: disp_cols.append(f'{m}(건)')
+            disp_cols.append(q_amt_name)
+            if show_count_col: disp_cols.append(q_cnt_name)
+            
+        disp_cols.append('전체 합계')
+        if show_count_col: disp_cols.append('전체 합계(건)')
             
         final = final[disp_cols]
         
         with ctrl_col2:
             sort_options = [c for c in disp_cols if c != '업체명']
-            default_idx = sort_options.index('누적 합계')
+            default_idx = sort_options.index('전체 합계')
             sort_target = st.selectbox("⬇️ 정렬 기준", options=sort_options, index=default_idx, label_visibility="collapsed", key=sort_key)
             
         final = final.sort_values(sort_target, ascending=False).reset_index(drop=True)
         final.insert(0, '랭킹 No.', range(1, len(final) + 1))
         
+        # 💡 예쁜 색상 스타일링
         fmt_map = {c: "{:,.0f}" for c in final.columns if c not in ['랭킹 No.', '업체명']}
         styled = final.style.format(fmt_map)
         styled = styled.set_properties(subset=['업체명'], **{'background-color': 'rgba(128, 128, 128, 0.1)', 'font-weight': 'bold'})
-        styled = styled.set_properties(subset=[c for c in final.columns if '월' in c and '(' not in c], **{'background-color': 'rgba(54, 162, 235, 0.05)'})
-        styled = styled.set_properties(subset=['1분기 합계'], **{'background-color': 'rgba(255, 159, 64, 0.1)', 'font-weight': 'bold'})
+        
+        month_cols = [c for c in final.columns if '월' in c and '(' not in c]
+        q_amt_cols = [c for c in final.columns if '분기 합계' in c]
+        cnt_cols = [c for c in final.columns if '(건)' in c]
+        
+        styled = styled.set_properties(subset=month_cols, **{'background-color': 'rgba(54, 162, 235, 0.05)'})
+        styled = styled.set_properties(subset=q_amt_cols, **{'background-color': 'rgba(255, 159, 64, 0.1)', 'font-weight': 'bold'})
+        styled = styled.set_properties(subset=['전체 합계'], **{'background-color': 'rgba(255, 99, 132, 0.1)', 'font-weight': 'bold', 'color':'#1e3a8a'})
+
         if show_count_col:
-            styled = styled.set_properties(subset=[c for c in final.columns if '(건)' in c], **{'background-color': 'rgba(76, 175, 80, 0.05)'})
+            styled = styled.set_properties(subset=cnt_cols, **{'background-color': 'rgba(76, 175, 80, 0.05)'})
             
         styled = styled.background_gradient(subset=[sort_target], cmap=cmap_color)
         
