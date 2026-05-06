@@ -47,7 +47,7 @@ def normalize_corp_name(name):
 
 TARGET_MAP = {normalize_corp_name(comp): comp for comp in TARGET_COMPANIES}
 
-# 사용자가 지정한 120개 타겟 세부품명 (중복 자동 제거)
+# 사용자가 지정한 120개 타겟 세부품명
 INCLUDE_ITEMS_RAW = [
     "CCTV카메라용렌즈", "IP전화기", "PA용스피커", "SSD저장장치", "게이트웨이", "경광등", 
     "광분배함", "광송수신기", "광송수신모듈", "광점퍼코드", "교통관제시스템", "그래픽용어댑터", 
@@ -83,7 +83,7 @@ INCLUDE_ITEMS_RAW = [
 ]
 INCLUDE_ITEMS = [x.strip() for x in list(set(INCLUDE_ITEMS_RAW)) if x.strip()]
 
-# --- 3. 로컬 데이터 로드 (💡 V31 순정 금액 로직 완벽 복원) ---
+# --- 3. 로컬 데이터 로드 (💡 슈퍼 금액 파서 부활!) ---
 def load_historical_data_raw():
     file_month_map = {'data.csv': '1월', 'data02.csv': '2월', 'data02.cvs': '2월', 'data03.csv': '3월', 'data04.csv': '4월'}
     dfs = []
@@ -101,7 +101,6 @@ def load_historical_data_raw():
             df.rename(columns=lambda x: str(x).strip(), inplace=True)
             if '계약업체명' in df.columns and '업체명' not in df.columns: df.rename(columns={'계약업체명': '업체명'}, inplace=True)
             
-            # '세부품명' 최우선 추출
             target_item_col = None
             if '세부품명' in df.columns: target_item_col = '세부품명'
             elif '물품분류명' in df.columns: target_item_col = '물품분류명'
@@ -112,14 +111,25 @@ def load_historical_data_raw():
 
             df[req_col] = df[req_col].fillna('').astype(str).str.replace('nan', '', regex=False).str.replace(r'\.0$', '', regex=True).str.strip()
 
-            # 💡 [V31 순정 복원] 네가 가장 정확하다고 했던 바로 그 금액 로직!
-            if '납품증감금액' in df.columns: df['금액'] = pd.to_numeric(df['납품증감금액'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
-            elif '합계납품증감금액' in df.columns: df['금액'] = pd.to_numeric(df['합계납품증감금액'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
-            elif '납품요구금액' in df.columns: df['금액'] = pd.to_numeric(df['납품요구금액'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
-            elif '금액' in df.columns: df['금액'] = pd.to_numeric(df['금액'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
-            else: continue
+            # 💡 [슈퍼 금액 파서 롤백] 0원 덮어쓰기 방지! (인텔리빅스 80억 보존)
+            calc_amt = pd.Series(0.0, index=df.index)
             
-            temp_df = df[['업체명', target_item_col, '금액', req_col]].copy()
+            # 1. 납품요구금액(기초금액) 스캔
+            for col in ['납품요구금액', '금액', '납품금액']:
+                if col in df.columns:
+                    base_amt = pd.to_numeric(df[col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+                    calc_amt = calc_amt.where(calc_amt != 0, base_amt)
+            
+            # 2. 증감금액이 0원이 아닌 경우에만 덮어쓰기
+            for col in ['납품증감금액', '합계납품증감금액']:
+                if col in df.columns:
+                    mod_amt = pd.to_numeric(df[col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+                    mask = mod_amt != 0
+                    calc_amt.loc[mask] = mod_amt[mask]
+            
+            df['최종금액'] = calc_amt
+
+            temp_df = df[['업체명', target_item_col, '최종금액', req_col]].copy()
             temp_df.columns = ['업체명', '세부품명', '금액', '납품요구번호']
             temp_df['월'] = target_month
             
@@ -174,6 +184,7 @@ def fetch_api_data_raw():
 
             total_count_str = root.findtext('.//totalCount')
             if total_count_str: total_count = int(total_count_str)
+
             if total_count == 0: break
 
             items = root.findall('.//item')
@@ -223,7 +234,7 @@ def fetch_api_data_raw():
         
     except Exception: return pd.DataFrame(), f"⚠️ 파싱 에러"
 
-# --- 5. 데이터 통합 및 정제 (💡 엄브렐라 필터 적용) ---
+# --- 5. 데이터 통합 및 정제 (💡 완전체 우산 필터 적용) ---
 def get_processed_data_raw():
     df_hist = load_historical_data_raw()
     df_api, api_msg = fetch_api_data_raw()
@@ -235,7 +246,6 @@ def get_processed_data_raw():
         existing_nos = set(df_hist['납품요구번호'].unique())
         existing_nos.discard('') 
         existing_nos.discard('nan')
-        
         df_api_clean = df_api[~df_api['납품요구번호'].isin(existing_nos)]
         df_total = pd.concat([df_hist, df_api_clean], ignore_index=True)
     elif not df_api.empty:
@@ -243,24 +253,28 @@ def get_processed_data_raw():
     else:
         df_total = df_hist.copy()
 
-    # 💡 [핵심: 우산 필터(Umbrella Filter)] 
-    # 1. 120개 리스트 단어가 포함된 타겟 계약 번호 찾기
+    # 💡 [정밀 우산 필터] 
     if not df_total.empty and '세부품명' in df_total.columns:
         escaped_items = [re.escape(x) for x in INCLUDE_ITEMS]
         pattern = '|'.join(escaped_items)
         
-        # 타겟 품목이 포함된 '주문번호' 목록 추출
-        valid_orders = df_total[df_total['세부품명'].astype(str).str.contains(pattern, na=False, case=False)]['납품요구번호'].unique()
+        # 1. 120개 키워드가 '포함(Contains)'된 타겟 행들을 먼저 찾음
+        mask_contains = df_total['세부품명'].astype(str).str.contains(pattern, na=False, case=False)
         
-        # 2. 해당 주문번호에 딸려있는 모든 부대비용(설치비, 소프트웨어 등)까지 100% 살려냄!
-        df_total = df_total[df_total['납품요구번호'].isin(valid_orders)]
+        # 2. 그 타겟 행들의 '납품요구번호'를 우산(집합)으로 만듦
+        valid_orders = set(df_total[mask_contains]['납품요구번호'].unique())
+        valid_orders.discard('')
+        valid_orders.discard('nan')
+        
+        # 3. 우산에 포함된 주문번호거나, 직접 키워드를 포함하는 행만 살림! (부대비용 100% 생존)
+        df_total = df_total[mask_contains | df_total['납품요구번호'].isin(valid_orders)]
 
     return df_total, api_msg
 
 df_total, api_msg = get_processed_data_raw()
 
 # --- 6. UI 및 새로고침 버튼 ---
-st.markdown(f"<div class='main-title'>🏆 조달청 실적 분석 v45.0 (엄브렐라 필터 + V31 순정 복원)</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='main-title'>🏆 조달청 실적 분석 v46.0 (슈퍼 금액 파서 + 우산 필터 결합판)</div>", unsafe_allow_html=True)
 
 col_head1, col_head2 = st.columns([5, 1])
 with col_head1:
@@ -276,7 +290,6 @@ with st.sidebar:
         st.error("⚠️ 조건에 맞는 데이터가 없습니다.")
         selected_items = []
     else:
-        # 우산 필터로 딸려 들어온 기타 품목들도 리스트에 보여줌
         all_items = sorted(df_total['세부품명'].dropna().unique())
         col_s1, col_s2 = st.columns(2)
         if col_s1.button("✅ 전체 선택"):
