@@ -7,6 +7,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from io import BytesIO
 import time
+import urllib.parse
 
 # --- 1. 기본 설정 및 KST 시계 ---
 st.set_page_config(page_title="조달청 실적 분석 대시보드", layout="wide")
@@ -133,19 +134,19 @@ def load_historical_data_raw():
     if not result_df.empty: result_df = result_df.drop_duplicates()
     return result_df
 
-# --- 4. 실시간 API 수집 (💡 타임밤 버그 픽스!) ---
+# --- 4. 실시간 API 수집 ---
 def fetch_api_data_raw():
     now = get_now_kst()
     try:
         import urllib.parse
-        RAW_KEY = "c1b379f7734c7d624ddefea07510eae71b6e12c5fb89970319d76c5ae8db5248"
+        # 💡 [핵심] 네가 새로 발급받은 인증키 적용!
+        RAW_KEY = "15bc460106a7359afdd54c91410a8dd94c17076ba2aa7d4308cfb8e07e9ce5ae"
         API_KEY = urllib.parse.unquote(RAW_KEY)
         URL = "http://apis.data.go.kr/1230000/at/ShoppingMallPrdctInfoService/getDlvrReqInfoList"
         
-        # 💡 [핵심 버그 수정] 달력이 5월로 넘어가도 무조건 "4월 1일 ~ 현재" 조회
+        # 4월 1일부터 현재까지 조회 후 파이썬에서 20일 이후만 걸러냄
         bgn_date = "20260401"
         end_date = now.strftime('%Y%m%d')
-        # 💡 무조건 "4월 20일"을 컷오프 기준으로 하드코딩
         cutoff_date = "20260420"
         
         all_new_data = []
@@ -201,7 +202,6 @@ def fetch_api_data_raw():
                     item_name = item.findtext('dtilPrdctClsfcNm', '')
                     if not item_name: item_name = item.findtext('prdctClsfcNm', '')
                     
-                    # 데이터가 5월이면 "5월"로 동적 분류
                     api_month_str = f"{int(date_clean[4:6])}월"
                     
                     all_new_data.append({
@@ -251,11 +251,11 @@ def get_processed_data_raw():
 
     return df_total, api_msg
 
-# 매번 하드디스크/API에서 새로 로드 (캐시 제로)
+# 매번 하드디스크/API에서 새로 로드
 df_total, api_msg = get_processed_data_raw()
 
 # --- 6. UI 및 새로고침 버튼 ---
-st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v39.0 (날짜 버그 픽스)</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v40.0 (새 인증키 + 화이트리스트)</div>", unsafe_allow_html=True)
 
 col_head1, col_head2 = st.columns([5, 1])
 with col_head1:
@@ -291,7 +291,6 @@ if not selected_items:
 else:
     df_f = df_total[df_total['세부품명'].isin(selected_items)].copy()
     
-    # 5월 데이터도 들어올 수 있으므로 분기 로직 업데이트
     df_f['분기'] = df_f['월'].apply(lambda x: '1분기' if x in ['1월', '2월', '3월'] else '2분기')
     df_f['총계'] = '총합계'
     
@@ -310,7 +309,6 @@ else:
         time_col = '월' if trend_view == '월별' else ('분기' if trend_view == '분기별' else '총계')
         m_df = df_f.groupby(time_col).agg(금액=('금액', 'sum'), 건수=('납품요구번호', 'nunique')).reset_index()
         
-        # 월별 소팅 로직 (1월, 2월, 3월, 4월, 5월 정렬)
         if trend_view == '월별':
             m_df['sort_key'] = m_df['월'].str.replace('월', '').astype(int)
             m_df = m_df.sort_values('sort_key').drop(columns=['sort_key'])
@@ -325,8 +323,6 @@ else:
         
     with col_b:
         st.subheader("🍩 시장 점유율")
-        
-        # 파이 차트 보기 동적 옵션 생성 (데이터에 존재하는 월만)
         avail_months = sorted(df_f['월'].unique(), key=lambda x: int(x.replace('월', '')))
         pie_options = ["총합계 (전체)", "1분기 (1~3월)", "2분기 (4월~)"] + avail_months
         pie_view = st.selectbox("분석 기간 선택", pie_options, label_visibility="collapsed")
@@ -351,7 +347,6 @@ else:
         
         ctrl_col1, ctrl_col2 = st.columns([2.4, 1])
         
-        # 동적 월별 피벗 테이블
         all_months = sorted(df_data['월'].unique(), key=lambda x: int(x.replace('월', '')))
         if not all_months: return st.warning("해당 조건의 실적이 없습니다.")
             
@@ -431,6 +426,18 @@ else:
         sort_key='sort_total', 
         dl_key='dl_total', 
         cmap_color='Blues'
+    )
+
+    st.markdown("<br><br>", unsafe_allow_html=True)
+
+    board_df_mas = df_f[df_f['MAS여부'] == 'Y'].copy()
+    render_ranking_board(
+        df_data=board_df_mas, 
+        title="🏢 MAS 계약 전용 실적 랭킹", 
+        show_count_col=show_cnt, 
+        sort_key='sort_mas', 
+        dl_key='dl_mas', 
+        cmap_color='Greens'
     )
 
 st.markdown("<br><center style='color:gray;'>Copyright(C) 2026 Joey Kim. Data from Public Data Portal.</center>", unsafe_allow_html=True)
