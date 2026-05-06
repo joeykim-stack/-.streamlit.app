@@ -7,7 +7,6 @@ import plotly.express as px
 import plotly.graph_objects as go
 from io import BytesIO
 import time
-import re
 import urllib.parse
 
 # --- 1. 기본 설정 및 KST 시계 ---
@@ -18,13 +17,13 @@ def get_now_kst():
 
 st.markdown("""
     <style>
-    .main-title { font-size: 2.2rem; font-weight: 800; color: #1e3a8a; margin-bottom: 0.5rem; }
+    .main-title { font-size: 2.2rem; font-weight: 800; margin-bottom: 0.5rem; }
     .update-time { color: #6c757d; font-size: 0.9rem; margin-bottom: 2rem; }
     .stCheckbox { margin-bottom: -15px; }
     </style>
 """, unsafe_allow_html=True)
 
-# --- 2. 분석 대상 업체 및 화이트리스트 세팅 ---
+# --- 2. 분석 대상 업체 및 제외 품목 세팅 (V31 블랙리스트 롤백!) ---
 TARGET_COMPANIES = [
     "주식회사 티제이원", "주식회사 파로스", "주식회사 포딕스시스템", "주식회사 세오", 
     "주식회사 펜타게이트", "주식회사 홍석", "주식회사 솔디아", "주식회사 정현씨앤씨", "주식회사 디라직", 
@@ -41,49 +40,24 @@ TARGET_COMPANIES = [
     "비티에스 주식회사", "주식회사 인텔리빅스", "주식회사 비알인포텍"
 ]
 
+EXCLUDE_ITEMS = [
+    "무인교통감시장치", "교통관제시스템", "구내방송장치", "마이크로폰", "마이크스탠드", 
+    "무선마이크장치", "버스승강장", "보행자안전차단기", "산업제어소프트웨어", "생체인식장비", 
+    "세탁물건조기", "소프트웨어유지및지원서비스", "스트로보또는경고등", "스피커스탠드", 
+    "스피커제어유닛", "업소용세탁기", "오디오모니터", "오디오믹서", "증폭기결합", "오디오앰프", 
+    "오이도장비커넥터및스테이지박스", "오디오장비커넥터및스테이지박스", "이퀄라이저", 
+    "정보화교육서비스", "주차관제장치", "차량번호판독기", "출입통제시스템", "태양전지조절기", 
+    "파일시스템소프트웨어", "패키지소프트웨어개발및도입서비스", "플러그용잭", "해석또는과학소프트웨어", 
+    "화재경보장치", "콤팩트디스크재생또는녹음기", "리튬전지", "리셉터클", "라디오튜너"
+]
+
 def normalize_corp_name(name):
     if not name: return ""
     return name.replace('주식회사', '').replace('(주)', '').replace(' ', '').strip()
 
 TARGET_MAP = {normalize_corp_name(comp): comp for comp in TARGET_COMPANIES}
 
-# 사용자가 지정한 120개 타겟 세부품명
-INCLUDE_ITEMS_RAW = [
-    "CCTV카메라용렌즈", "IP전화기", "PA용스피커", "SSD저장장치", "게이트웨이", "경광등", 
-    "광분배함", "광송수신기", "광송수신모듈", "광점퍼코드", "교통관제시스템", "그래픽용어댑터", 
-    "금속상자", "기상전광판", "기억유닛", "네트워크스위치", "네트워크시스템장비용랙", 
-    "누전차단기", "니켈카드뮴축전지", "데스크톱컴퓨터", "도난방지기", "동보장치", "동작분석기", 
-    "디스크어레이", "디지털비디오레코더", "랙캐비닛용패널", "랜접속카드", "레이더", 
-    "레이드저장장치", "레이드컨트롤러", "레이스웨이", "리모트앰프", "리튬2차전지", 
-    "마을무선방송장치", "마이크로폰", "멀티스크린컴퓨터", "멀티탭", "무선랜액세스포인트", 
-    "무선중계기", "무선통신장치", "밀폐고정형납축전지", "방송수신기", "방화벽장치", 
-    "베어본컴퓨터", "벨", "보안소프트웨어", "보안용카메라", "보행자안전차단기", 
-    "보행자작동신호기", "분배기", "분석및과학용소프트웨어", "브래킷", "비디오네트워킹장비", 
-    "비상경보기", "산업관리소프트웨어", "삼각대", "서지흡수기", "소프트웨어유지및지원서비스", 
-    "송신기", "스위치박스", "스위칭모드전원공급장치", "스테이플", "스피커", 
-    "시스템관리소프트웨어", "실내환경측정장치", "안내전광판", "안내판", "액정모니터", 
-    "엔코더", "연기감지기", "열감지기", "열선감지기", "영상감시장치", "영상분배기", 
-    "영상정보디스플레이장치", "오디오앰프", "온도트랜스미터", "온습도트랜스미터", 
-    "원격단말장치(RTU)", "유틸리티소프트웨어", "음향발생장치", "인버터", "인증서버소프트웨어", 
-    "인터콤장비", "인터폰", "자동화재속보기", "자료수집장치", "장치제어보드", "적외선방사기", 
-    "적외선수신기", "적외선카메라", "적외선탐지기", "전력공급장치", "전원공급장치", "전자카드", 
-    "종합폴", "지도소프트웨어", "차량검지기", "차량차단기", "카드인쇄기", "카메라브래킷", 
-    "카메라컨트롤러", "카메라하우징", "카메라회전대", "컨버터", "컴퓨터망전환장치", 
-    "컴퓨터서버", "컴퓨터안면인식장치", "컴퓨터정맥인식장치", "컴퓨터지문인식장치", 
-    "컴퓨터홍채인식장치", "콘솔익스텐더", "태블릿컴퓨터", "태양전지조절기", "텔레비전", 
-    "텔레비전거치대", "통신소프트웨어", "통신용변조기", "통신케이블어셈블리", "특수목적컴퓨터", 
-    "패키지소프트웨어개발및도입서비스", "풀박스", "하드디스크드라이브", "호온스피커", 
-    "1종금속제가요전선관", "450/750V 일반용유연성단심비닐절연전선", "LAP외피광케이블", "UTP케이블", 
-    "경광등", "고주파동축케이블", "광분배함", "광점퍼코드", "금속기둥", "난연전력케이블", 
-    "난연접지용비닐절연전선", "네트워크스위치", "네트워크시스템장비용랙", "디지털비디오레코더", 
-    "방송수신기", "벨", "보안용카메라", "브래킷", "서지흡수기", "안내전광판", "안내판", 
-    "영상감시장치", "영상정보디스플레이장치", "오디오모니터", "오디오앰프", "전원공급장치", 
-    "접지봉", "접지판", "정보통신공사", "정보화교육서비스", "제어케이블", "철근콘크리트공사", 
-    "카메라브래킷", "컴퓨터서버", "토공사", "통신용변조기", "포장공사", "폴리에틸렌전선관", "풀박스"
-]
-INCLUDE_ITEMS = [x.strip() for x in list(set(INCLUDE_ITEMS_RAW)) if x.strip()]
-
-# --- 3. 로컬 데이터 로드 (💡 슈퍼 금액 파서 부활!) ---
+# --- 3. 로컬 데이터 로드 (물품분류명 & 무결점 파서 적용) ---
 def load_historical_data_raw():
     file_month_map = {'data.csv': '1월', 'data02.csv': '2월', 'data02.cvs': '2월', 'data03.csv': '3월', 'data04.csv': '4월'}
     dfs = []
@@ -100,27 +74,18 @@ def load_historical_data_raw():
             
             df.rename(columns=lambda x: str(x).strip(), inplace=True)
             if '계약업체명' in df.columns and '업체명' not in df.columns: df.rename(columns={'계약업체명': '업체명'}, inplace=True)
-            
-            target_item_col = None
-            if '세부품명' in df.columns: target_item_col = '세부품명'
-            elif '물품분류명' in df.columns: target_item_col = '물품분류명'
-            elif '품명' in df.columns: target_item_col = '품명'
-            
+            if '품명' in df.columns and '물품분류명' not in df.columns: df.rename(columns={'품명': '물품분류명'}, inplace=True)
             req_col = '납품요구번호' if '납품요구번호' in df.columns else ('주문번호' if '주문번호' in df.columns else None)
-            if not req_col or not target_item_col: continue 
+            if not req_col or '물품분류명' not in df.columns: continue 
 
             df[req_col] = df[req_col].fillna('').astype(str).str.replace('nan', '', regex=False).str.replace(r'\.0$', '', regex=True).str.strip()
 
-            # 💡 [슈퍼 금액 파서 롤백] 0원 덮어쓰기 방지! (인텔리빅스 80억 보존)
+            # 💡 [슈퍼 파서 엔진] 원본을 덮어쓰지 않고 진짜 금액만 쏙 빼옴
             calc_amt = pd.Series(0.0, index=df.index)
-            
-            # 1. 납품요구금액(기초금액) 스캔
             for col in ['납품요구금액', '금액', '납품금액']:
                 if col in df.columns:
                     base_amt = pd.to_numeric(df[col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
                     calc_amt = calc_amt.where(calc_amt != 0, base_amt)
-            
-            # 2. 증감금액이 0원이 아닌 경우에만 덮어쓰기
             for col in ['납품증감금액', '합계납품증감금액']:
                 if col in df.columns:
                     mod_amt = pd.to_numeric(df[col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
@@ -128,16 +93,18 @@ def load_historical_data_raw():
                     calc_amt.loc[mask] = mod_amt[mask]
             
             df['최종금액'] = calc_amt
-
-            temp_df = df[['업체명', target_item_col, '최종금액', req_col]].copy()
-            temp_df.columns = ['업체명', '세부품명', '금액', '납품요구번호']
+            
+            temp_df = df[['업체명', '물품분류명', '최종금액', req_col]].copy()
+            temp_df.columns = ['업체명', '물품분류명', '금액', '납품요구번호']
             temp_df['월'] = target_month
             
             temp_df['업체명'] = temp_df['업체명'].astype(str).apply(lambda x: TARGET_MAP.get(normalize_corp_name(x), None))
             temp_df = temp_df.dropna(subset=['업체명'])
             
-            if 'MAS여부' in df.columns: temp_df['MAS여부'] = df['MAS여부'].fillna('N').astype(str).str.strip().str.upper()
-            else: temp_df['MAS여부'] = 'Y' 
+            if 'MAS여부' in df.columns:
+                temp_df['MAS여부'] = df['MAS여부'].fillna('N').astype(str).str.strip().str.upper()
+            else:
+                temp_df['MAS여부'] = 'Y' 
                 
             dfs.append(temp_df)
         except Exception: continue
@@ -146,7 +113,7 @@ def load_historical_data_raw():
     if not result_df.empty: result_df = result_df.drop_duplicates()
     return result_df
 
-# --- 4. 실시간 API 수집 ---
+# --- 4. 실시간 API 수집 (새 인증키 + 날짜 버그 픽스) ---
 def fetch_api_data_raw():
     now = get_now_kst()
     try:
@@ -184,7 +151,6 @@ def fetch_api_data_raw():
 
             total_count_str = root.findtext('.//totalCount')
             if total_count_str: total_count = int(total_count_str)
-
             if total_count == 0: break
 
             items = root.findall('.//item')
@@ -207,8 +173,9 @@ def fetch_api_data_raw():
                 
                 if norm_corp in TARGET_MAP:
                     req_no = item.findtext('dlvrReqNo', '').strip()
-                    item_name = item.findtext('dtilPrdctClsfcNm', '')
-                    if not item_name: item_name = item.findtext('prdctClsfcNm', '')
+                    
+                    # 💡 V31 시절처럼 API에서도 '물품분류명'으로 통일!
+                    item_name = item.findtext('prdctClsfcNm', '')
                     
                     api_month_str = f"{int(date_clean[4:6])}월"
                     
@@ -217,7 +184,7 @@ def fetch_api_data_raw():
                     
                     all_new_data.append({
                         '업체명': TARGET_MAP[norm_corp], 
-                        '세부품명': item_name, 
+                        '물품분류명': item_name, 
                         '금액': float(amt_str), 
                         '납품요구번호': req_no if req_no else f'API_{time.time()}', 
                         '월': api_month_str,
@@ -230,11 +197,11 @@ def fetch_api_data_raw():
 
         if all_new_data:
             return pd.DataFrame(all_new_data), f"🟢 4/20 이후 실적 {added_count}건 수집!"
-        return pd.DataFrame(), f"🔵 스캔 완료 (4/20 이후 타겟 실적 없음)"
+        return pd.DataFrame(), f"🔵 스캔 완료 (4/20 이후 실적 없음)"
         
     except Exception: return pd.DataFrame(), f"⚠️ 파싱 에러"
 
-# --- 5. 데이터 통합 및 정제 (💡 완전체 우산 필터 적용) ---
+# --- 5. 데이터 통합 및 정제 (V31 블랙리스트 필터) ---
 def get_processed_data_raw():
     df_hist = load_historical_data_raw()
     df_api, api_msg = fetch_api_data_raw()
@@ -246,6 +213,7 @@ def get_processed_data_raw():
         existing_nos = set(df_hist['납품요구번호'].unique())
         existing_nos.discard('') 
         existing_nos.discard('nan')
+        
         df_api_clean = df_api[~df_api['납품요구번호'].isin(existing_nos)]
         df_total = pd.concat([df_hist, df_api_clean], ignore_index=True)
     elif not df_api.empty:
@@ -253,28 +221,17 @@ def get_processed_data_raw():
     else:
         df_total = df_hist.copy()
 
-    # 💡 [정밀 우산 필터] 
-    if not df_total.empty and '세부품명' in df_total.columns:
-        escaped_items = [re.escape(x) for x in INCLUDE_ITEMS]
-        pattern = '|'.join(escaped_items)
-        
-        # 1. 120개 키워드가 '포함(Contains)'된 타겟 행들을 먼저 찾음
-        mask_contains = df_total['세부품명'].astype(str).str.contains(pattern, na=False, case=False)
-        
-        # 2. 그 타겟 행들의 '납품요구번호'를 우산(집합)으로 만듦
-        valid_orders = set(df_total[mask_contains]['납품요구번호'].unique())
-        valid_orders.discard('')
-        valid_orders.discard('nan')
-        
-        # 3. 우산에 포함된 주문번호거나, 직접 키워드를 포함하는 행만 살림! (부대비용 100% 생존)
-        df_total = df_total[mask_contains | df_total['납품요구번호'].isin(valid_orders)]
+    # 💡 [V31의 완벽했던 블랙리스트 방식] 37개 쓰레기 품목만 제거!
+    if not df_total.empty and '물품분류명' in df_total.columns:
+        pattern = '|'.join(EXCLUDE_ITEMS)
+        df_total = df_total[~df_total['물품분류명'].astype(str).str.contains(pattern, na=False, regex=True)]
 
     return df_total, api_msg
 
 df_total, api_msg = get_processed_data_raw()
 
-# --- 6. UI 및 새로고침 버튼 ---
-st.markdown(f"<div class='main-title'>🏆 조달청 실적 분석 v46.0 (슈퍼 금액 파서 + 우산 필터 결합판)</div>", unsafe_allow_html=True)
+# --- 6. UI 및 새로고침 버튼 (V31 레이아웃 완벽 복원) ---
+st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v47.0 (클래식 UI 롤백판)</div>", unsafe_allow_html=True)
 
 col_head1, col_head2 = st.columns([5, 1])
 with col_head1:
@@ -285,12 +242,12 @@ with col_head2:
 
 # --- 7. 사이드바 필터 ---
 with st.sidebar:
-    st.header("🔍 세부품명 상세 필터")
+    st.header("🔍 품목 상세 필터")
     if df_total.empty:
-        st.error("⚠️ 조건에 맞는 데이터가 없습니다.")
+        st.error("⚠️ 데이터를 찾을 수 없습니다.")
         selected_items = []
     else:
-        all_items = sorted(df_total['세부품명'].dropna().unique())
+        all_items = sorted(df_total['물품분류명'].dropna().unique())
         col_s1, col_s2 = st.columns(2)
         if col_s1.button("✅ 전체 선택"):
             for item in all_items: st.session_state[f"cb_{item}"] = True
@@ -304,25 +261,20 @@ with st.sidebar:
             if cb_key not in st.session_state: st.session_state[cb_key] = True
             if st.checkbox(item, key=cb_key): selected_items.append(item)
 
-# --- 8. 메인 화면 ---
+# --- 8. 메인 화면 (요약 & 차트) ---
 if not selected_items:
-    st.info("👈 왼쪽 사이드바에서 분석할 세부품명을 1개 이상 선택해주세요.")
+    st.info("👈 왼쪽 사이드바에서 분석할 품목을 1개 이상 선택해주세요.")
 else:
-    df_f = df_total[df_total['세부품명'].isin(selected_items)].copy()
-    
+    df_f = df_total[df_total['물품분류명'].isin(selected_items)].copy()
     df_f['분기'] = df_f['월'].apply(lambda x: '1분기' if x in ['1월', '2월', '3월'] else '2분기')
     df_f['총계'] = '총합계'
     
     t_cnt = df_f['납품요구번호'].nunique()
     t_amt = df_f['금액'].sum()
-    
-    # 💡 인텔리빅스 80억 확인용
-    intellivix_amt = df_f[df_f['업체명'] == '주식회사 인텔리빅스']['금액'].sum()
-
     c1, c2, c3 = st.columns(3)
     c1.metric("💰 누적 매출액", f"{t_amt:,.0f} 원")
     c2.metric("📝 총 계약 건수", f"{t_cnt:,} 건")
-    c3.metric("🏢 인텔리빅스 총실적(확인용)", f"{intellivix_amt:,.0f} 원")
+    c3.metric("📊 건당 평균 실적", f"{(t_amt/t_cnt if t_cnt>0 else 0):,.0f} 원")
     st.markdown("---")
 
     col_a, col_b = st.columns(2)
@@ -448,6 +400,18 @@ else:
         sort_key='sort_total', 
         dl_key='dl_total', 
         cmap_color='Blues'
+    )
+
+    st.markdown("<br><br>", unsafe_allow_html=True)
+
+    board_df_mas = df_f[df_f['MAS여부'] == 'Y'].copy()
+    render_ranking_board(
+        df_data=board_df_mas, 
+        title="🏢 MAS 계약 전용 실적 랭킹", 
+        show_count_col=show_cnt, 
+        sort_key='sort_mas', 
+        dl_key='dl_mas', 
+        cmap_color='Greens'
     )
 
 st.markdown("<br><center style='color:gray;'>Copyright(C) 2026 Joey Kim. Data from Public Data Portal.</center>", unsafe_allow_html=True)
