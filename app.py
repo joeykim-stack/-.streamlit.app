@@ -7,6 +7,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from io import BytesIO
 import time
+import re
 
 # --- 1. 기본 설정 및 KST 시계 ---
 st.set_page_config(page_title="조달청 실적 분석 대시보드", layout="wide")
@@ -22,7 +23,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- 2. 분석 대상 업체 및 제외 품목 세팅 ---
+# --- 2. 분석 대상 업체 및 제외 품목 세팅 (V31 쌩얼 블랙리스트) ---
 TARGET_COMPANIES = [
     "주식회사 티제이원", "주식회사 파로스", "주식회사 포딕스시스템", "주식회사 세오", 
     "주식회사 펜타게이트", "주식회사 홍석", "주식회사 솔디아", "주식회사 정현씨앤씨", "주식회사 디라직", 
@@ -44,9 +45,9 @@ EXCLUDE_ITEMS = [
     "무선마이크장치", "버스승강장", "보행자안전차단기", "산업제어소프트웨어", "생체인식장비", 
     "세탁물건조기", "소프트웨어유지및지원서비스", "스트로보또는경고등", "스피커스탠드", 
     "스피커제어유닛", "업소용세탁기", "오디오모니터", "오디오믹서", "증폭기결합", "오디오앰프", 
-    "오디오장비커넥터및스테이지박스", "이퀄라이저", "정보화교육서비스", "주차관제장치", 
-    "차량번호판독기", "출입통제시스템", "태양전지조절기", "파일시스템소프트웨어", 
-    "패키지소프트웨어개발및도입서비스", "플러그용잭", "해석또는과학소프트웨어", 
+    "오이도장비커넥터및스테이지박스", "오디오장비커넥터및스테이지박스", "이퀄라이저", 
+    "정보화교육서비스", "주차관제장치", "차량번호판독기", "출입통제시스템", "태양전지조절기", 
+    "파일시스템소프트웨어", "패키지소프트웨어개발및도입서비스", "플러그용잭", "해석또는과학소프트웨어", 
     "화재경보장치", "콤팩트디스크재생또는녹음기", "리튬전지", "리셉터클", "라디오튜너"
 ]
 
@@ -58,7 +59,7 @@ TARGET_MAP = {normalize_corp_name(comp): comp for comp in TARGET_COMPANIES}
 
 # --- 3. 로컬 데이터 로드 (V31 무결점 파서) ---
 def load_historical_data_raw():
-    file_month_map = {'data.csv': '1월', 'data02.csv': '2월', 'data03.csv': '3월', 'data04.csv': '4월'}
+    file_month_map = {'data.csv': '1월', 'data02.csv': '2월', 'data02.cvs': '2월', 'data03.csv': '3월', 'data04.csv': '4월'}
     dfs = []
     for file, target_month in file_month_map.items():
         try:
@@ -66,9 +67,11 @@ def load_historical_data_raw():
             for config in [{'encoding':'utf-16','sep':'\t'}, {'encoding':'cp949','sep':','}, {'encoding':'utf-8','sep':','}, {'encoding':'utf-8-sig','sep':','}]:
                 try:
                     temp_df = pd.read_csv(file, encoding=config['encoding'], sep=config['sep'], on_bad_lines='skip', low_memory=False)
-                    if len(temp_df.columns) > 2: df = temp_df; break
+                    if len(temp_df.columns) > 2:
+                        df = temp_df; break
                 except: pass
             if df is None: continue
+            
             df.rename(columns=lambda x: str(x).strip(), inplace=True)
             if '계약업체명' in df.columns and '업체명' not in df.columns: df.rename(columns={'계약업체명': '업체명'}, inplace=True)
             if '품명' in df.columns and '물품분류명' not in df.columns: df.rename(columns={'품명': '물품분류명'}, inplace=True)
@@ -89,118 +92,178 @@ def load_historical_data_raw():
                     calc_amt.loc[mask] = mod_amt[mask]
             
             df['최종금액'] = calc_amt
+            
             temp_df = df[['업체명', '물품분류명', '최종금액', req_col]].copy()
             temp_df.columns = ['업체명', '물품분류명', '금액', '납품요구번호']
             temp_df['월'] = target_month
+            
             temp_df['업체명'] = temp_df['업체명'].astype(str).apply(lambda x: TARGET_MAP.get(normalize_corp_name(x), None))
             temp_df = temp_df.dropna(subset=['업체명'])
-            temp_df['MAS여부'] = 'Y' 
+            
+            if 'MAS여부' in df.columns: temp_df['MAS여부'] = df['MAS여부'].fillna('N').astype(str).str.strip().str.upper()
+            else: temp_df['MAS여부'] = 'Y' 
+                
             dfs.append(temp_df)
         except Exception: continue
     
     result_df = pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
-    return result_df.drop_duplicates() if not result_df.empty else result_df
+    if not result_df.empty: result_df = result_df.drop_duplicates()
+    return result_df
 
-# --- 4. 실시간 API 수집 (💡 TEST 1 성공 공식 적용!) ---
+# --- 4. 실시간 API 수집 (💡 진공청소기 모드: 까다로운 필터 제거!) ---
 def fetch_api_data_raw():
     now = get_now_kst()
-    RAW_KEY = "15bc460106a7359afdd54c91410a8dd94c17076ba2aa7d4308cfb8e07e9ce5ae"
-    BASE_URL = "http://apis.data.go.kr/1230000/at/ShoppingMallPrdctInfoService/getDlvrReqInfoList"
-    
-    # 💡 [해결책 1] 한 번에 한 달씩만 조회 (4월 따로, 5월 따로)
-    date_ranges = [
-        ("20260401", "20260430"),
-        ("20260501", (now - timedelta(days=1)).strftime('%Y%m%d')) # 오늘 대신 안전하게 '어제'까지
-    ]
-    
-    all_new_data = []
-    added_count = 0
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'}
-
-    for bgn, end in date_ranges:
-        if bgn > end: continue # 5월 1일인데 오늘이 5월 1일이면 스킵
-        page_no = 1
-        while True:
-            # 💡 [해결책 2] URL 수동 조립 (requests 변조 방지) + numOfRows=100 (부하 감소)
-            req_url = f"{BASE_URL}?serviceKey={RAW_KEY}&numOfRows=100&pageNo={page_no}&inqryDiv=1&inqryBgnDate={bgn}&inqryEndDate={end}"
-            try:
-                res = requests.get(req_url, headers=headers, timeout=15)
-                if res.status_code != 200: break
+    try:
+        RAW_KEY = "15bc460106a7359afdd54c91410a8dd94c17076ba2aa7d4308cfb8e07e9ce5ae"
+        BASE_URL = "http://apis.data.go.kr/1230000/at/ShoppingMallPrdctInfoService/getDlvrReqInfoList"
+        
+        # 1개월 초과 에러를 막기 위해 4월과 5월을 쪼개서 요청
+        date_ranges = [
+            ("20260401", "20260430"),
+            ("20260501", now.strftime('%Y%m%d'))
+        ]
+        
+        all_new_data = []
+        added_count = 0
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'}
+        
+        for bgn, end in date_ranges:
+            if bgn > end: continue
+            page_no = 1
+            while True:
+                req_url = f"{BASE_URL}?serviceKey={RAW_KEY}&numOfRows=100&pageNo={page_no}&inqryDiv=1&inqryBgnDate={bgn}&inqryEndDate={end}"
                 
+                try:
+                    res = requests.get(req_url, headers=headers, timeout=15)
+                except Exception: break
+                
+                if res.status_code != 200: break
+
                 root = ET.fromstring(res.content)
                 result_code = root.findtext('.//resultCode')
-                if result_code not in ['00', '0']: break # 07 등이 뜨면 이 구간 중단
+                if result_code and result_code not in ['00', '0']: break
 
-                total_count = int(root.findtext('.//totalCount') or 0)
-                if total_count == 0: break
+                total_count_str = root.findtext('.//totalCount')
+                if not total_count_str or int(total_count_str) == 0: break
+                total_count = int(total_count_str)
 
                 items = root.findall('.//item')
+                if not items: break
+                
                 for item in items:
-                    date_val = (item.findtext('dlvrReqRcptDate') or item.findtext('dlvrReqDate', '')).replace('-', '')[:8]
-                    if date_val < "20260420": continue # 4월 20일 이전은 엑셀에 있으니 중복 방지 스킵
-
-                    norm_corp = normalize_corp_name(item.findtext('corpNm', ''))
+                    req_date = item.findtext('dlvrReqDate', '')
+                    rcpt_date = item.findtext('dlvrReqRcptDate', '')
+                    target_date = rcpt_date if rcpt_date else req_date
+                    date_clean = target_date.replace('-', '').replace('.', '').strip()[:8]
+                    
+                    if date_clean and date_clean < "20260420": continue
+                    
+                    # 💡 [핵심] '제3자단가' 글자 유무 검사 삭제! 타겟 업체면 일단 싹 다 쓸어 담는다!
+                    raw_corp = item.findtext('corpNm', '')
+                    norm_corp = normalize_corp_name(raw_corp)
+                    
                     if norm_corp in TARGET_MAP:
+                        req_no = item.findtext('dlvrReqNo', '').strip()
+                        # 물품명 누락 방지를 위해 두 필드 모두 체크
+                        item_name = item.findtext('prdctClsfcNm', '') or item.findtext('dtilPrdctClsfcNm', '')
+                        api_month_str = f"{int(date_clean[4:6])}월"
+                        
+                        amt_str = item.findtext('dlvrReqAmt', '0')
+                        if not amt_str or str(amt_str).strip() == '': amt_str = '0'
+                        
                         all_new_data.append({
                             '업체명': TARGET_MAP[norm_corp], 
-                            '물품분류명': item.findtext('prdctClsfcNm', ''), 
-                            '금액': float(item.findtext('dlvrReqAmt') or 0), 
-                            '납품요구번호': item.findtext('dlvrReqNo', '').strip() or f'API_{time.time()}', 
-                            '월': f"{int(date_val[4:6])}월", 'MAS여부': 'Y' 
+                            '물품분류명': item_name, 
+                            '금액': float(amt_str), 
+                            '납품요구번호': req_no if req_no else f'API_{time.time()}', 
+                            '월': api_month_str,
+                            'MAS여부': 'Y' 
                         })
                         added_count += 1
                 
                 if page_no * 100 >= total_count: break
                 page_no += 1
-            except: break
 
-    if all_new_data:
-        return pd.DataFrame(all_new_data), f"🟢 실시간 데이터 수집 성공! (신규 {added_count}건)"
-    return pd.DataFrame(), f"🔵 최신화 완료 (4/20 이후 추가 실적 없음)"
+        if all_new_data:
+            return pd.DataFrame(all_new_data), f"🟢 신규 실시간 데이터 수집 성공! (4/20 이후 {added_count}건)"
+        return pd.DataFrame(), f"🔵 최신화 완료 (4/20 이후 추가 실적 없음)"
+        
+    except Exception: return pd.DataFrame(), f"⚠️ 파싱 에러"
 
-# --- 5. 데이터 통합 및 정제 ---
+# --- 5. 데이터 통합 및 정제 (V31 블랙리스트) ---
 def get_processed_data_raw():
     df_hist = load_historical_data_raw()
     df_api, api_msg = fetch_api_data_raw()
-    if not df_api.empty and not df_hist.empty:
-        existing = set(df_hist['납품요구번호'].unique())
-        df_api_clean = df_api[~df_api['납품요구번호'].isin(existing)]
-        df_total = pd.concat([df_hist, df_api_clean], ignore_index=True)
-    else:
-        df_total = df_api if not df_api.empty else df_hist
 
-    if not df_total.empty:
+    if not df_hist.empty: df_hist['납품요구번호'] = df_hist['납품요구번호'].astype(str).str.strip()
+    if not df_api.empty: df_api['납품요구번호'] = df_api['납품요구번호'].astype(str).str.strip()
+
+    if not df_api.empty and not df_hist.empty:
+        existing_nos = set(df_hist['납품요구번호'].unique())
+        existing_nos.discard('') 
+        existing_nos.discard('nan')
+        
+        df_api_clean = df_api[~df_api['납품요구번호'].isin(existing_nos)]
+        df_total = pd.concat([df_hist, df_api_clean], ignore_index=True)
+    elif not df_api.empty:
+        df_total = df_api.copy()
+    else:
+        df_total = df_hist.copy()
+
+    if not df_total.empty and '물품분류명' in df_total.columns:
         pattern = '|'.join(EXCLUDE_ITEMS)
         df_total = df_total[~df_total['물품분류명'].astype(str).str.contains(pattern, na=False, regex=True)]
+
     return df_total, api_msg
 
 df_total, api_msg = get_processed_data_raw()
 
-# --- 6. UI ---
-st.markdown(f"<div class='main-title'>🏆 조달청 통합 대시보드 v56.0 (실시간 연동 완료)</div>", unsafe_allow_html=True)
-col_head1, col_head2 = st.columns([5, 1])
-with col_head1: st.markdown(f"<div class='update-time'>🕒 상태: {api_msg}</div>", unsafe_allow_html=True)
-with col_head2: 
-    if st.button("🔄 즉시 새로고침", use_container_width=True): st.rerun()
+# --- 6. UI 및 새로고침 버튼 ---
+st.markdown(f"<div class='main-title'>🏆 조달청 통합 대시보드 v57.0 (1년치 풀템플릿 완벽복구)</div>", unsafe_allow_html=True)
 
+col_head1, col_head2 = st.columns([5, 1])
+with col_head1:
+    st.markdown(f"<div class='update-time'>🕒 상태: {api_msg}</div>", unsafe_allow_html=True)
+with col_head2:
+    if st.button("🔄 즉시 새로고침", use_container_width=True):
+        st.rerun()
+
+# --- 7. 사이드바 필터 ---
 with st.sidebar:
     st.header("🔍 품목 상세 필터")
     if df_total.empty:
-        st.error("데이터 없음")
+        st.error("⚠️ 데이터를 찾을 수 없습니다.")
         selected_items = []
     else:
         all_items = sorted(df_total['물품분류명'].dropna().unique())
-        if st.button("✅ 전체 선택"): 
+        col_s1, col_s2 = st.columns(2)
+        if col_s1.button("✅ 전체 선택"):
             for item in all_items: st.session_state[f"cb_{item}"] = True
-        selected_items = [i for i in all_items if st.checkbox(i, value=st.session_state.get(f"cb_{i}", True), key=f"cb_{i}")]
+        if col_s2.button("❌ 전체 삭제"):
+            for item in all_items: st.session_state[f"cb_{item}"] = False
 
-# --- 7. 메인 화면 ---
-if selected_items:
+        st.write("---")
+        selected_items = []
+        for item in all_items:
+            cb_key = f"cb_{item}"
+            if cb_key not in st.session_state: st.session_state[cb_key] = True
+            if st.checkbox(item, key=cb_key): selected_items.append(item)
+
+# --- 8. 메인 화면 (요약 & 차트) ---
+if not selected_items:
+    st.info("👈 왼쪽 사이드바에서 분석할 품목을 1개 이상 선택해주세요.")
+else:
     df_f = df_total[df_total['물품분류명'].isin(selected_items)].copy()
-    def get_quarter(m_str):
-        m = int(m_str.replace('월',''))
-        return '1분기' if m<=3 else ('2분기' if m<=6 else ('3분기' if m<=9 else '4분기'))
+    
+    def get_quarter(month_str):
+        m = int(month_str.replace('월', ''))
+        if m <= 3: return '1분기'
+        elif m <= 6: return '2분기'
+        elif m <= 9: return '3분기'
+        else: return '4분기'
+        
     df_f['분기'] = df_f['월'].apply(get_quarter)
+    df_f['총계'] = '총합계'
     
     t_cnt = df_f['납품요구번호'].nunique()
     t_amt = df_f['금액'].sum()
@@ -210,8 +273,52 @@ if selected_items:
     c3.metric("📊 건당 평균 실적", f"{(t_amt/t_cnt if t_cnt>0 else 0):,.0f} 원")
     st.markdown("---")
 
-    def render_ranking_board(df_data, title, show_count_col, sort_key, dl_key):
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.subheader("📈 실적 추이")
+        trend_view = st.radio("조회 기준", ["월별", "분기별", "총합계"], horizontal=True, label_visibility="collapsed")
+        time_col = '월' if trend_view == '월별' else ('분기' if trend_view == '분기별' else '총계')
+        m_df = df_f.groupby(time_col).agg(금액=('금액', 'sum'), 건수=('납품요구번호', 'nunique')).reset_index()
+        
+        if trend_view == '월별':
+            m_df['sort_key'] = m_df['월'].str.replace('월', '').astype(int)
+            m_df = m_df.sort_values('sort_key').drop(columns=['sort_key'])
+        elif trend_view == '분기별': 
+            m_df = m_df.sort_values('분기')
+            
+        fig = go.Figure()
+        fig.add_trace(go.Bar(x=m_df[time_col], y=m_df['금액'], name='매출액', marker_color='#3b82f6', yaxis='y1'))
+        fig.add_trace(go.Scatter(x=m_df[time_col], y=m_df['건수'], name='건수', mode='lines+markers+text', text=m_df['건수'], textposition='top center', marker_color='#ef4444', yaxis='y2'))
+        fig.update_layout(yaxis=dict(title='매출액', showgrid=False), yaxis2=dict(title='건수', overlaying='y', side='right', showgrid=False), legend=dict(orientation="h", y=1.15, x=1), margin=dict(t=20, b=0))
+        st.plotly_chart(fig, use_container_width=True)
+        
+    with col_b:
+        st.subheader("🍩 시장 점유율")
+        avail_months = sorted(df_f['월'].unique(), key=lambda x: int(x.replace('월', '')))
+        pie_options = ["총합계 (전체)", "1분기", "2분기", "3분기", "4분기"] + avail_months
+        pie_view = st.selectbox("분석 기간 선택", pie_options, label_visibility="collapsed")
+        
+        if pie_view == "총합계 (전체)": pie_df = df_f
+        elif "분기" in pie_view: pie_df = df_f[df_f['분기'] == pie_view]
+        else: pie_df = df_f[df_f['월'] == pie_view]
+        
+        if pie_df.empty: st.info(f"선택하신 '{pie_view}' 기간의 실적 데이터가 없습니다.")
+        else:
+            top10_pie = pie_df.groupby('업체명')['금액'].sum().nlargest(10).reset_index()
+            fig_pie = px.pie(top10_pie, names='업체명', values='금액', hole=0.4, color_discrete_sequence=px.colors.qualitative.Pastel)
+            fig_pie.update_traces(textposition='inside', textinfo='percent+label')
+            fig_pie.update_layout(showlegend=False, margin=dict(t=20, b=0))
+            st.plotly_chart(fig_pie, use_container_width=True)
+
+    st.markdown("---")
+
+    # 💡 [핵심] 잃어버렸던 1년 치 풀-스케일 랭킹 보드 완벽 복원!
+    def render_ranking_board(df_data, title, show_count_col, sort_key, dl_key, cmap_color='Blues'):
         st.subheader(title)
+        ctrl_col1, ctrl_col2 = st.columns([2.4, 1])
+        
+        if df_data.empty: return st.warning("해당 조건의 실적이 없습니다.")
+            
         p_amt = pd.pivot_table(df_data, values='금액', index='업체명', columns='월', aggfunc='sum', fill_value=0).reset_index()
         p_cnt = pd.pivot_table(df_data, values='납품요구번호', index='업체명', columns='월', aggfunc='nunique', fill_value=0).reset_index()
         
@@ -220,23 +327,111 @@ if selected_items:
             if m not in p_amt.columns: p_amt[m] = 0
             if m not in p_cnt.columns: p_cnt[m] = 0
             
-        p_amt['1분기 합계'] = p_amt[['1월','2월','3월']].sum(axis=1)
-        p_amt['2분기 합계'] = p_amt[['4월','5월','6월']].sum(axis=1)
+        q1_months = ['1월', '2월', '3월']
+        q2_months = ['4월', '5월', '6월']
+        q3_months = ['7월', '8월', '9월']
+        q4_months = ['10월', '11월', '12월']
+        
+        p_amt['1분기 합계'] = p_amt[q1_months].sum(axis=1)
+        p_amt['2분기 합계'] = p_amt[q2_months].sum(axis=1)
+        p_amt['3분기 합계'] = p_amt[q3_months].sum(axis=1)
+        p_amt['4분기 합계'] = p_amt[q4_months].sum(axis=1)
         p_amt['전체 합계'] = p_amt[all_months].sum(axis=1)
+        
+        p_cnt['1분기(건)'] = p_cnt[q1_months].sum(axis=1)
+        p_cnt['2분기(건)'] = p_cnt[q2_months].sum(axis=1)
+        p_cnt['3분기(건)'] = p_cnt[q3_months].sum(axis=1)
+        p_cnt['4분기(건)'] = p_cnt[q4_months].sum(axis=1)
+        p_cnt['전체 합계(건)'] = p_cnt[all_months].sum(axis=1)
+        
         p_cnt.rename(columns={m: f'{m}(건)' for m in all_months}, inplace=True)
         
         final = pd.merge(p_amt, p_cnt, on='업체명', how='outer').fillna(0)
-        disp_cols = ['업체명', '1월','2월','3월','1분기 합계', '4월','5월','6월','2분기 합계', '전체 합계']
-        final = final.sort_values('전체 합계', ascending=False).reset_index(drop=True)
-        final.insert(0, 'No.', range(1, len(final)+1))
         
-        styled = final[disp_cols].style.format({c: "{:,.0f}" for c in disp_cols if c != '업체명'})
-        styled = styled.set_properties(subset=['1분기 합계','2분기 합계'], **{'background-color': 'rgba(255, 159, 64, 0.1)', 'font-weight': 'bold'})
-        styled = styled.set_properties(subset=['전체 합계'], **{'background-color': 'rgba(255, 99, 132, 0.1)', 'font-weight': 'bold'})
-        st.dataframe(styled, use_container_width=True, hide_index=True)
+        disp_cols = ['업체명']
+        quarters = [
+            (q1_months, '1분기 합계', '1분기(건)'),
+            (q2_months, '2분기 합계', '2분기(건)'),
+            (q3_months, '3분기 합계', '3분기(건)'),
+            (q4_months, '4분기 합계', '4분기(건)')
+        ]
+        
+        for q_months, q_amt_name, q_cnt_name in quarters:
+            for m in q_months:
+                disp_cols.append(m)
+                if show_count_col: disp_cols.append(f'{m}(건)')
+            disp_cols.append(q_amt_name)
+            if show_count_col: disp_cols.append(q_cnt_name)
+            
+        disp_cols.append('전체 합계')
+        if show_count_col: disp_cols.append('전체 합계(건)')
+            
+        final = final[disp_cols]
+        
+        with ctrl_col2:
+            sort_options = [c for c in disp_cols if c != '업체명']
+            default_idx = sort_options.index('전체 합계')
+            sort_target = st.selectbox("⬇️ 정렬 기준", options=sort_options, index=default_idx, label_visibility="collapsed", key=sort_key)
+            
+        final = final.sort_values(sort_target, ascending=False).reset_index(drop=True)
+        final.insert(0, '랭킹 No.', range(1, len(final) + 1))
+        
+        fmt_map = {c: "{:,.0f}" for c in final.columns if c not in ['랭킹 No.', '업체명']}
+        styled = final.style.format(fmt_map)
+        styled = styled.set_properties(subset=['업체명'], **{'background-color': 'rgba(128, 128, 128, 0.1)', 'font-weight': 'bold'})
+        
+        month_cols = [c for c in final.columns if '월' in c and '(' not in c]
+        q_amt_cols = [c for c in final.columns if '분기 합계' in c]
+        cnt_cols = [c for c in final.columns if '(건)' in c]
+        
+        styled = styled.set_properties(subset=month_cols, **{'background-color': 'rgba(54, 162, 235, 0.05)'})
+        styled = styled.set_properties(subset=q_amt_cols, **{'background-color': 'rgba(255, 159, 64, 0.1)', 'font-weight': 'bold'})
+        styled = styled.set_properties(subset=['전체 합계'], **{'background-color': 'rgba(255, 99, 132, 0.1)', 'font-weight': 'bold', 'color':'#1e3a8a'})
 
-    render_ranking_board(df_f, "🏆 업체별 종합 실적 랭킹", False, 'sort_t', 'dl_t')
-else:
-    st.info("👈 왼쪽에서 품목을 선택하세요.")
+        if show_count_col:
+            styled = styled.set_properties(subset=cnt_cols, **{'background-color': 'rgba(76, 175, 80, 0.05)'})
+            
+        styled = styled.background_gradient(subset=[sort_target], cmap=cmap_color)
+        
+        st.dataframe(styled, use_container_width=True, hide_index=True, height=600)
 
-st.markdown("<br><center style='color:gray;'>Copyright(C) 2026 Joey Kim.</center>", unsafe_allow_html=True)
+        xlsx = BytesIO()
+        with pd.ExcelWriter(xlsx, engine='xlsxwriter') as wr:
+            final.to_excel(wr, index=False, sheet_name='실적랭킹')
+        st.download_button("💾 엑셀 다운로드", xlsx.getvalue(), f'조달랭킹_{dl_key}_{get_now_kst().strftime("%Y%m%d")}.xlsx', key=dl_key)
+
+    st.subheader("⚙️ 랭킹 보드 컨트롤")
+    ctrl_col_a, ctrl_col_b = st.columns(2)
+    with ctrl_col_a:
+        show_cnt = st.checkbox("📝 월/분기별 계약건수 함께 보기", value=False)
+    with ctrl_col_b:
+        include_mas = st.checkbox("🏢 종합 랭킹에 MAS 계약 포함 (해제 시 '우수조달'만 표시)", value=True)
+
+    st.markdown("---")
+
+    board_df_total = df_f.copy()
+    if not include_mas:
+        board_df_total = board_df_total[board_df_total['MAS여부'] == 'N']
+        
+    render_ranking_board(
+        df_data=board_df_total, 
+        title="🏆 업체별 종합 실적 랭킹 (우수조달 + MAS 전체)", 
+        show_count_col=show_cnt, 
+        sort_key='sort_total', 
+        dl_key='dl_total', 
+        cmap_color='Blues'
+    )
+
+    st.markdown("<br><br>", unsafe_allow_html=True)
+
+    board_df_mas = df_f[df_f['MAS여부'] == 'Y'].copy()
+    render_ranking_board(
+        df_data=board_df_mas, 
+        title="🏢 MAS 계약 전용 실적 랭킹", 
+        show_count_col=show_cnt, 
+        sort_key='sort_mas', 
+        dl_key='dl_mas', 
+        cmap_color='Greens'
+    )
+
+st.markdown("<br><center style='color:gray;'>Copyright(C) 2026 Joey Kim. Data from Public Data Portal.</center>", unsafe_allow_html=True)
