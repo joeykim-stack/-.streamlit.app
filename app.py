@@ -161,7 +161,7 @@ def fetch_api_data_raw():
             success, res = False, None
             for retry in range(3):
                 try:
-                    res = requests.get(req_url, headers=headers, timeout=15)
+                    res = requests.get(req_url, headers=headers, timeout=60)
                     if res.status_code == 200:
                         success = True; break
                     else: time.sleep(2 ** retry)
