@@ -22,7 +22,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- 2. 분석 대상 업체 및 제외 품목 세팅 ---
+# --- 2. 분석 대상 업체 및 제외 품목 ---
 TARGET_COMPANIES = [
     "주식회사 티제이원", "주식회사 파로스", "주식회사 포딕스시스템", "주식회사 세오", 
     "주식회사 펜타게이트", "주식회사 홍석", "주식회사 솔디아", "주식회사 정현씨앤씨", "주식회사 디라직", 
@@ -56,81 +56,105 @@ def normalize_corp_name(name):
 
 TARGET_MAP = {normalize_corp_name(comp): comp for comp in TARGET_COMPANIES}
 
-# --- 3. 로컬 데이터 로드 ---
+# 💡 [핵심] 네 말대로 '엑셀 파싱 로직'을 독립시켜서 API와 엑셀이 똑같은 검사를 받게 만듦!
+def unified_data_parser(df_raw, target_month=None):
+    if df_raw is None or df_raw.empty: return pd.DataFrame()
+    df = df_raw.copy()
+
+    # 1. 엑셀과 API의 각기 다른 컬럼명을 하나로 통일
+    rename_map = {
+        '계약업체명': '업체명', 'corpNm': '업체명',
+        '품명': '물품분류명', 'prdctClsfcNm': '물품분류명',
+        '주문번호': '납품요구번호', 'dlvrReqNo': '납품요구번호',
+        '납품요구접수일자': '일자', 'dlvrReqRcptDate': '일자', 'dlvrReqDate': '일자',
+        'cntrctCnclsStleNm': '계약형태'
+    }
+    df.rename(columns=lambda x: rename_map.get(str(x).strip(), str(x).strip()), inplace=True)
+
+    # API 특유의 대체 품명 처리
+    if '물품분류명' not in df.columns and 'dtilPrdctClsfcNm' in df.columns:
+        df.rename(columns={'dtilPrdctClsfcNm': '물품분류명'}, inplace=True)
+    elif '물품분류명' in df.columns and 'dtilPrdctClsfcNm' in df.columns:
+        df['물품분류명'] = df['물품분류명'].fillna(df['dtilPrdctClsfcNm'])
+
+    if '업체명' not in df.columns or '물품분류명' not in df.columns or '납품요구번호' not in df.columns:
+        return pd.DataFrame()
+
+    # 2. 엑셀 로직: 업체명 필터
+    df['업체명'] = df['업체명'].astype(str).apply(lambda x: TARGET_MAP.get(normalize_corp_name(x), None))
+    df = df.dropna(subset=['업체명'])
+    if df.empty: return pd.DataFrame()
+
+    df['납품요구번호'] = df['납품요구번호'].fillna('').astype(str).str.replace('nan', '', regex=False).str.replace(r'\.0$', '', regex=True).str.strip()
+
+    # 3. 엑셀 로직: 완벽한 금액 파싱 (API의 dlvrReqAmt가 0원이어도 증감액 찾아냄)
+    calc_amt = pd.Series(0.0, index=df.index)
+    for col in ['납품요구금액', '금액', '납품금액', 'dlvrReqAmt']:
+        if col in df.columns:
+            base_amt = pd.to_numeric(df[col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+            calc_amt = calc_amt.where(calc_amt != 0, base_amt)
+
+    for col in ['납품증감금액', '합계납품증감금액', 'dlvrIemRducAmt', 'chgDlvrReqAmt']:
+        if col in df.columns:
+            mod_amt = pd.to_numeric(df[col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+            mask = mod_amt != 0
+            calc_amt.loc[mask] = mod_amt[mask]
+
+    df['금액'] = calc_amt
+
+    # 4. 월 할당 로직
+    if target_month:
+        df['월'] = target_month
+    else:
+        if '일자' in df.columns:
+            date_clean = df['일자'].astype(str).str.replace('-', '').str.replace('.', '').str.strip().str[:8]
+            df['월'] = date_clean.str[4:6].apply(lambda x: f"{int(x)}월" if str(x).isdigit() else "4월")
+        else:
+            df['월'] = "5월"
+
+    # 5. MAS 분류 로직
+    if 'MAS여부' in df.columns:
+        df['MAS여부'] = df['MAS여부'].fillna('N').astype(str).str.strip().str.upper()
+    elif '계약형태' in df.columns:
+        df['MAS여부'] = df['계약형태'].astype(str).apply(lambda x: 'Y' if any(k in x for k in ['다수공급자', 'MAS', 'mas', '제3자']) else 'N')
+    else:
+        df['MAS여부'] = 'Y'
+
+    return df[['업체명', '물품분류명', '금액', '납품요구번호', '월', 'MAS여부']]
+
+# --- 4. 엑셀 파일 로드 (새로운 파서 적용) ---
 def load_historical_data_raw():
     file_month_map = {'data.csv': '1월', 'data02.csv': '2월', 'data03.csv': '3월', 'data04.csv': '4월'}
     dfs = []
     for file, target_month in file_month_map.items():
-        try:
-            df = None
-            for config in [{'encoding':'utf-16','sep':'\t'}, {'encoding':'cp949','sep':','}, {'encoding':'utf-8','sep':','}, {'encoding':'utf-8-sig','sep':','}]:
-                try:
-                    temp_df = pd.read_csv(file, encoding=config['encoding'], sep=config['sep'], on_bad_lines='skip', low_memory=False)
-                    if len(temp_df.columns) > 2: df = temp_df; break
-                except: pass
-            if df is None: continue
-            
-            df.rename(columns=lambda x: str(x).strip(), inplace=True)
-            if '계약업체명' in df.columns and '업체명' not in df.columns: df.rename(columns={'계약업체명': '업체명'}, inplace=True)
-            if '품명' in df.columns and '물품분류명' not in df.columns: df.rename(columns={'품명': '물품분류명'}, inplace=True)
-            req_col = '납품요구번호' if '납품요구번호' in df.columns else ('주문번호' if '주문번호' in df.columns else None)
-            if not req_col or '물품분류명' not in df.columns: continue 
+        df = None
+        for config in [{'encoding':'utf-16','sep':'\t'}, {'encoding':'cp949','sep':','}, {'encoding':'utf-8','sep':','}, {'encoding':'utf-8-sig','sep':','}]:
+            try:
+                temp_df = pd.read_csv(file, encoding=config['encoding'], sep=config['sep'], on_bad_lines='skip', low_memory=False)
+                if len(temp_df.columns) > 2: df = temp_df; break
+            except: pass
+        if df is not None:
+            clean_df = unified_data_parser(df, target_month=target_month)
+            if not clean_df.empty: dfs.append(clean_df)
+    return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
-            df[req_col] = df[req_col].fillna('').astype(str).str.replace('nan', '', regex=False).str.replace(r'\.0$', '', regex=True).str.strip()
-
-            calc_amt = pd.Series(0.0, index=df.index)
-            for col in ['납품요구금액', '금액', '납품금액']:
-                if col in df.columns:
-                    base_amt = pd.to_numeric(df[col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
-                    calc_amt = calc_amt.where(calc_amt != 0, base_amt)
-            for col in ['납품증감금액', '합계납품증감금액']:
-                if col in df.columns:
-                    mod_amt = pd.to_numeric(df[col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
-                    mask = mod_amt != 0
-                    calc_amt.loc[mask] = mod_amt[mask]
-            
-            df['최종금액'] = calc_amt
-            temp_df = df[['업체명', '물품분류명', '최종금액', req_col]].copy()
-            temp_df.columns = ['업체명', '물품분류명', '금액', '납품요구번호']
-            temp_df['월'] = target_month
-            temp_df['업체명'] = temp_df['업체명'].astype(str).apply(lambda x: TARGET_MAP.get(normalize_corp_name(x), None))
-            temp_df = temp_df.dropna(subset=['업체명'])
-            
-            if 'MAS여부' in df.columns: temp_df['MAS여부'] = df['MAS여부'].fillna('N').astype(str).str.strip().str.upper()
-            else: temp_df['MAS여부'] = 'Y' 
-                
-            dfs.append(temp_df)
-        except Exception: continue
-    
-    result_df = pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
-    return result_df.drop_duplicates() if not result_df.empty else result_df
-
-# --- 4. 실시간 API 수집 (💡 월 분할 + MAS 분류 완벽 적용) ---
+# --- 5. 실시간 API 수집 (API도 엑셀 파서 통과!) ---
 def fetch_api_data_raw():
     now = get_now_kst()
     RAW_KEY = "15bc460106a7359afdd54c91410a8dd94c17076ba2aa7d4308cfb8e07e9ce5ae"
     BASE_URL = "http://apis.data.go.kr/1230000/at/ShoppingMallPrdctInfoService/getDlvrReqInfoList"
     
-    # 💡 [핵심 1] 마의 '월 경계선' 돌파! 4월과 5월을 완벽하게 끊어서 호출
-    date_ranges = [
-        ("20260420", "20260430"),
-        ("20260501", now.strftime('%Y%m%d'))
-    ]
-    
+    date_ranges = [("20260420", "20260430"), ("20260501", now.strftime('%Y%m%d'))]
     all_new_data = []
-    added_count = 0
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'}
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36'}
 
     for bgn, end in date_ranges:
         if bgn > end: continue
         page_no = 1
-        
         while True:
             req_url = f"{BASE_URL}?serviceKey={RAW_KEY}&numOfRows=999&pageNo={page_no}&inqryDiv=1&inqryBgnDate={bgn}&inqryEndDate={end}"
             
-            # 좀비 모드 (서버 뻗어도 재시도)
-            success = False
-            res = None
+            success, res = False, None
             for retry in range(3):
                 try:
                     res = requests.get(req_url, headers=headers, timeout=15)
@@ -143,52 +167,29 @@ def fetch_api_data_raw():
             
             try:
                 root = ET.fromstring(res.content)
-                result_code = root.findtext('.//resultCode')
-                if result_code not in ['00', '0']: break
-
-                total_count = int(root.findtext('.//totalCount') or 0)
-                if total_count == 0: break
-
+                if root.findtext('.//resultCode') not in ['00', '0']: break
+                if int(root.findtext('.//totalCount') or 0) == 0: break
+                
                 items = root.findall('.//item')
                 if not items: break
                 
+                # 💡 [핵심] API 데이터를 한 줄씩 거르지 않고, 모든 태그를 딕셔너리로 만들어 엑셀처럼 긁어옴
                 for item in items:
-                    norm_corp = normalize_corp_name(item.findtext('corpNm', ''))
-                    
-                    if norm_corp in TARGET_MAP:
-                        date_val = (item.findtext('dlvrReqRcptDate') or item.findtext('dlvrReqDate', '')).replace('-', '')[:8]
-                        api_month_str = f"{int(date_val[4:6])}월" if len(date_val) >= 6 else "4월"
-                        
-                        amt_str = item.findtext('dlvrReqAmt', '0')
-                        if not amt_str or str(amt_str).strip() == '': amt_str = '0'
-                        
-                        req_no = item.findtext('dlvrReqNo', '').strip()
-                        item_name = item.findtext('prdctClsfcNm', '') or item.findtext('dtilPrdctClsfcNm', '')
-                        
-                        # 💡 [핵심 2] 버리지 않고 '분류'만 한다! (MAS vs 우수조달)
-                        cntrct_stle = item.findtext('cntrctCnclsStleNm', '')
-                        mas_flag = 'Y' if any(k in cntrct_stle for k in ['다수공급자', 'MAS', 'mas']) else 'N'
-                        
-                        all_new_data.append({
-                            '업체명': TARGET_MAP[norm_corp], 
-                            '물품분류명': item_name, 
-                            '금액': float(amt_str), 
-                            '납품요구번호': req_no if req_no else f'API_{time.time()}', 
-                            '월': api_month_str,
-                            'MAS여부': mas_flag 
-                        })
-                        added_count += 1
+                    row_dict = {child.tag: child.text for child in item}
+                    all_new_data.append(row_dict)
                 
-                if page_no * 999 >= total_count: break
+                if page_no * 999 >= int(root.findtext('.//totalCount')): break
                 page_no += 1
-                
             except Exception: break
 
     if all_new_data:
-        return pd.DataFrame(all_new_data), f"🟢 실시간 데이터 수집 성공! (신규 {added_count}건)"
+        # API 결과물을 엑셀(DataFrame) 형태로 변환 후, 무결점 파서에 통과시킴!
+        df_api_raw = pd.DataFrame(all_new_data)
+        df_api_clean = unified_data_parser(df_api_raw)
+        return df_api_clean, f"🟢 실시간 데이터 수집 성공! (신규 {len(df_api_clean)}건)"
     return pd.DataFrame(), f"🔵 최신화 완료 (4/20 이후 추가 실적 없음)"
 
-# --- 5. 데이터 통합 및 정제 ---
+# --- 6. 통합 및 필터링 ---
 def get_processed_data_raw():
     df_hist = load_historical_data_raw()
     df_api, api_msg = fetch_api_data_raw()
@@ -203,12 +204,13 @@ def get_processed_data_raw():
     if not df_total.empty:
         pattern = '|'.join(EXCLUDE_ITEMS)
         df_total = df_total[~df_total['물품분류명'].astype(str).str.contains(pattern, na=False, regex=True)]
+    
     return df_total, api_msg
 
 df_total, api_msg = get_processed_data_raw()
 
-# --- 6. UI ---
-st.markdown(f"<div class='main-title'>🏆 조달청 통합 대시보드 v59.0 (실시간 퍼펙트 연동판)</div>", unsafe_allow_html=True)
+# --- 7. UI ---
+st.markdown(f"<div class='main-title'>🏆 조달청 통합 대시보드 v60.0 (단일 파이프라인 통일)</div>", unsafe_allow_html=True)
 col_head1, col_head2 = st.columns([5, 1])
 with col_head1: st.markdown(f"<div class='update-time'>🕒 상태: {api_msg}</div>", unsafe_allow_html=True)
 with col_head2: 
@@ -229,7 +231,7 @@ with st.sidebar:
         st.write("---")
         selected_items = [i for i in all_items if st.checkbox(i, value=st.session_state.get(f"cb_{i}", True), key=f"cb_{i}")]
 
-# --- 7. 메인 화면 ---
+# --- 8. 메인 화면 ---
 if selected_items:
     df_f = df_total[df_total['물품분류명'].isin(selected_items)].copy()
     def get_quarter(m_str):
