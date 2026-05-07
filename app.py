@@ -7,6 +7,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from io import BytesIO
 import time
+import traceback
 
 # --- 1. 기본 설정 및 KST 시계 ---
 st.set_page_config(page_title="조달청 실적 분석 대시보드", layout="wide")
@@ -56,29 +57,30 @@ def normalize_corp_name(name):
 
 TARGET_MAP = {normalize_corp_name(comp): comp for comp in TARGET_COMPANIES}
 
-# 💡 [핵심] 네 말대로 '엑셀 파싱 로직'을 독립시켜서 API와 엑셀이 똑같은 검사를 받게 만듦!
+# 💡 [핵심 해결] 침묵의 에러를 잡은 완벽한 통합 파서
 def unified_data_parser(df_raw, target_month=None):
     if df_raw is None or df_raw.empty: return pd.DataFrame()
     df = df_raw.copy()
 
-    # 1. 엑셀과 API의 각기 다른 컬럼명을 하나로 통일
-    rename_map = {
-        '계약업체명': '업체명', 'corpNm': '업체명',
-        '품명': '물품분류명', 'prdctClsfcNm': '물품분류명',
-        '주문번호': '납품요구번호', 'dlvrReqNo': '납품요구번호',
-        '납품요구접수일자': '일자', 'dlvrReqRcptDate': '일자', 'dlvrReqDate': '일자',
-        'cntrctCnclsStleNm': '계약형태'
-    }
-    df.rename(columns=lambda x: rename_map.get(str(x).strip(), str(x).strip()), inplace=True)
+    # 1. 안전한 매핑 (중복 컬럼 충돌 방지!)
+    if 'corpNm' in df.columns: df['업체명'] = df['corpNm']
+    elif '계약업체명' in df.columns: df['업체명'] = df['계약업체명']
+    
+    if 'prdctClsfcNm' in df.columns: df['물품분류명'] = df['prdctClsfcNm']
+    elif 'dtilPrdctClsfcNm' in df.columns: df['물품분류명'] = df['dtilPrdctClsfcNm']
+    elif '품명' in df.columns: df['물품분류명'] = df['품명']
+    
+    if 'dlvrReqNo' in df.columns: df['납품요구번호'] = df['dlvrReqNo']
+    elif '주문번호' in df.columns: df['납품요구번호'] = df['주문번호']
+    
+    if 'dlvrReqRcptDate' in df.columns: df['일자'] = df['dlvrReqRcptDate']
+    elif 'dlvrReqDate' in df.columns: df['일자'] = df['dlvrReqDate']
+    elif '납품요구접수일자' in df.columns: df['일자'] = df['납품요구접수일자']
 
-    # API 특유의 대체 품명 처리
-    if '물품분류명' not in df.columns and 'dtilPrdctClsfcNm' in df.columns:
-        df.rename(columns={'dtilPrdctClsfcNm': '물품분류명'}, inplace=True)
-    elif '물품분류명' in df.columns and 'dtilPrdctClsfcNm' in df.columns:
-        df['물품분류명'] = df['물품분류명'].fillna(df['dtilPrdctClsfcNm'])
-
-    if '업체명' not in df.columns or '물품분류명' not in df.columns or '납품요구번호' not in df.columns:
-        return pd.DataFrame()
+    # 필수 컬럼 검사 (없으면 안전하게 빈 프레임 반환)
+    for req_col in ['업체명', '물품분류명', '납품요구번호']:
+        if req_col not in df.columns:
+            return pd.DataFrame()
 
     # 2. 엑셀 로직: 업체명 필터
     df['업체명'] = df['업체명'].astype(str).apply(lambda x: TARGET_MAP.get(normalize_corp_name(x), None))
@@ -87,7 +89,7 @@ def unified_data_parser(df_raw, target_month=None):
 
     df['납품요구번호'] = df['납품요구번호'].fillna('').astype(str).str.replace('nan', '', regex=False).str.replace(r'\.0$', '', regex=True).str.strip()
 
-    # 3. 엑셀 로직: 완벽한 금액 파싱 (API의 dlvrReqAmt가 0원이어도 증감액 찾아냄)
+    # 3. 엑셀 로직: 완벽한 금액 파싱
     calc_amt = pd.Series(0.0, index=df.index)
     for col in ['납품요구금액', '금액', '납품금액', 'dlvrReqAmt']:
         if col in df.columns:
@@ -115,10 +117,12 @@ def unified_data_parser(df_raw, target_month=None):
     # 5. MAS 분류 로직
     if 'MAS여부' in df.columns:
         df['MAS여부'] = df['MAS여부'].fillna('N').astype(str).str.strip().str.upper()
-    elif '계약형태' in df.columns:
-        df['MAS여부'] = df['계약형태'].astype(str).apply(lambda x: 'Y' if any(k in x for k in ['다수공급자', 'MAS', 'mas', '제3자']) else 'N')
     else:
-        df['MAS여부'] = 'Y'
+        cntrct_col = 'cntrctCnclsStleNm' if 'cntrctCnclsStleNm' in df.columns else ('계약형태' if '계약형태' in df.columns else None)
+        if cntrct_col:
+            df['MAS여부'] = df[cntrct_col].astype(str).apply(lambda x: 'Y' if any(k in x for k in ['다수공급자', 'MAS', 'mas', '제3자']) else 'N')
+        else:
+            df['MAS여부'] = 'Y'
 
     return df[['업체명', '물품분류명', '금액', '납품요구번호', '월', 'MAS여부']]
 
@@ -138,7 +142,7 @@ def load_historical_data_raw():
             if not clean_df.empty: dfs.append(clean_df)
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
-# --- 5. 실시간 API 수집 (API도 엑셀 파서 통과!) ---
+# --- 5. 실시간 API 수집 (💡 에러의 침묵 완전 해제!) ---
 def fetch_api_data_raw():
     now = get_now_kst()
     RAW_KEY = "15bc460106a7359afdd54c91410a8dd94c17076ba2aa7d4308cfb8e07e9ce5ae"
@@ -152,7 +156,7 @@ def fetch_api_data_raw():
         if bgn > end: continue
         page_no = 1
         while True:
-            req_url = f"{BASE_URL}?serviceKey={RAW_KEY}&numOfRows=999&pageNo={page_no}&inqryDiv=1&inqryBgnDate={bgn}&inqryEndDate={end}"
+            req_url = f"{BASE_URL}?serviceKey={RAW_KEY}&numOfRows=100&pageNo={page_no}&inqryDiv=1&inqryBgnDate={bgn}&inqryEndDate={end}"
             
             success, res = False, None
             for retry in range(3):
@@ -163,30 +167,40 @@ def fetch_api_data_raw():
                     else: time.sleep(2 ** retry)
                 except: time.sleep(2 ** retry)
             
-            if not success or not res: break
+            if not success or not res: 
+                return pd.DataFrame(), f"🚨 API 통신 실패 (상태코드: {res.status_code if res else 'Timeout'})"
             
             try:
                 root = ET.fromstring(res.content)
-                if root.findtext('.//resultCode') not in ['00', '0']: break
-                if int(root.findtext('.//totalCount') or 0) == 0: break
+                if root.findtext('.//resultCode') not in ['00', '0']: 
+                    return pd.DataFrame(), f"🚨 API 거부: [{root.findtext('.//resultCode')}] {root.findtext('.//resultMsg')}"
+                
+                total_count_str = root.findtext('.//totalCount')
+                if not total_count_str or int(total_count_str) == 0: break
                 
                 items = root.findall('.//item')
                 if not items: break
                 
-                # 💡 [핵심] API 데이터를 한 줄씩 거르지 않고, 모든 태그를 딕셔너리로 만들어 엑셀처럼 긁어옴
                 for item in items:
                     row_dict = {child.tag: child.text for child in item}
                     all_new_data.append(row_dict)
                 
-                if page_no * 999 >= int(root.findtext('.//totalCount')): break
+                if page_no * 100 >= int(total_count_str): break
                 page_no += 1
-            except Exception: break
+            except Exception as e: 
+                return pd.DataFrame(), f"🚨 API 응답 파싱 에러: {str(e)}"
 
     if all_new_data:
-        # API 결과물을 엑셀(DataFrame) 형태로 변환 후, 무결점 파서에 통과시킴!
-        df_api_raw = pd.DataFrame(all_new_data)
-        df_api_clean = unified_data_parser(df_api_raw)
-        return df_api_clean, f"🟢 실시간 데이터 수집 성공! (신규 {len(df_api_clean)}건)"
+        try:
+            df_api_raw = pd.DataFrame(all_new_data)
+            df_api_clean = unified_data_parser(df_api_raw)
+            if df_api_clean.empty:
+                return pd.DataFrame(), f"🔵 최신화 완료 (API {len(all_new_data)}건 중 우리 타겟 업체/조건 없음)"
+            return df_api_clean, f"🟢 실시간 데이터 수집 성공! (신규 {len(df_api_clean)}건)"
+        except Exception as e:
+            # 💡 [핵심] 이제 파이썬이 에러를 숨기지 못하게 강제로 까발린다!
+            return pd.DataFrame(), f"🚨 내부 데이터 변환 에러: {str(e)}"
+    
     return pd.DataFrame(), f"🔵 최신화 완료 (4/20 이후 추가 실적 없음)"
 
 # --- 6. 통합 및 필터링 ---
@@ -210,7 +224,7 @@ def get_processed_data_raw():
 df_total, api_msg = get_processed_data_raw()
 
 # --- 7. UI ---
-st.markdown(f"<div class='main-title'>🏆 조달청 통합 대시보드 v60.0 (단일 파이프라인 통일)</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='main-title'>🏆 조달청 통합 대시보드 v61.0 (에러의 침묵 분쇄판)</div>", unsafe_allow_html=True)
 col_head1, col_head2 = st.columns([5, 1])
 with col_head1: st.markdown(f"<div class='update-time'>🕒 상태: {api_msg}</div>", unsafe_allow_html=True)
 with col_head2: 
