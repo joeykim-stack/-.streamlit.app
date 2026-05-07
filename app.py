@@ -22,7 +22,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- 2. 분석 대상 업체 및 제외 품목 세팅 (V31 블랙리스트) ---
+# --- 2. 분석 대상 업체 및 제외 품목 세팅 ---
 TARGET_COMPANIES = [
     "주식회사 티제이원", "주식회사 파로스", "주식회사 포딕스시스템", "주식회사 세오", 
     "주식회사 펜타게이트", "주식회사 홍석", "주식회사 솔디아", "주식회사 정현씨앤씨", "주식회사 디라직", 
@@ -69,6 +69,7 @@ def load_historical_data_raw():
                     if len(temp_df.columns) > 2: df = temp_df; break
                 except: pass
             if df is None: continue
+            
             df.rename(columns=lambda x: str(x).strip(), inplace=True)
             if '계약업체명' in df.columns and '업체명' not in df.columns: df.rename(columns={'계약업체명': '업체명'}, inplace=True)
             if '품명' in df.columns and '물품분류명' not in df.columns: df.rename(columns={'품명': '물품분류명'}, inplace=True)
@@ -104,80 +105,84 @@ def load_historical_data_raw():
     result_df = pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
     return result_df.drop_duplicates() if not result_df.empty else result_df
 
-# --- 4. 실시간 API 수집 (💡 과거 해법 100% 적용!) ---
+# --- 4. 실시간 API 수집 (💡 월 분할 + MAS 분류 완벽 적용) ---
 def fetch_api_data_raw():
     now = get_now_kst()
     RAW_KEY = "15bc460106a7359afdd54c91410a8dd94c17076ba2aa7d4308cfb8e07e9ce5ae"
     BASE_URL = "http://apis.data.go.kr/1230000/at/ShoppingMallPrdctInfoService/getDlvrReqInfoList"
     
-    # 💡 [핵심 1] 쓸데없는 1일 데이터 버리고 정확히 4월 20일부터만 핀포인트 조회! (서버 부하 대폭 감소)
-    bgn_date = "20260420"
-    end_date = now.strftime('%Y%m%d')
+    # 💡 [핵심 1] 마의 '월 경계선' 돌파! 4월과 5월을 완벽하게 끊어서 호출
+    date_ranges = [
+        ("20260420", "20260430"),
+        ("20260501", now.strftime('%Y%m%d'))
+    ]
     
     all_new_data = []
     added_count = 0
-    page_no = 1
-    
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'}
 
-    while True:
-        req_url = f"{BASE_URL}?serviceKey={RAW_KEY}&numOfRows=100&pageNo={page_no}&inqryDiv=1&inqryBgnDate={bgn_date}&inqryEndDate={end_date}"
+    for bgn, end in date_ranges:
+        if bgn > end: continue
+        page_no = 1
         
-        # 💡 [핵심 2] 과거 550페이지 실패를 극복했던 "지독한 좀비 모드 (Exponential Backoff)" 부활!
-        success = False
-        res = None
-        for retry in range(3):
+        while True:
+            req_url = f"{BASE_URL}?serviceKey={RAW_KEY}&numOfRows=999&pageNo={page_no}&inqryDiv=1&inqryBgnDate={bgn}&inqryEndDate={end}"
+            
+            # 좀비 모드 (서버 뻗어도 재시도)
+            success = False
+            res = None
+            for retry in range(3):
+                try:
+                    res = requests.get(req_url, headers=headers, timeout=15)
+                    if res.status_code == 200:
+                        success = True; break
+                    else: time.sleep(2 ** retry)
+                except: time.sleep(2 ** retry)
+            
+            if not success or not res: break
+            
             try:
-                res = requests.get(req_url, headers=headers, timeout=15)
-                if res.status_code == 200:
-                    success = True
-                    break
-                else:
-                    time.sleep(2 ** retry) # 1초, 2초, 4초 대기 후 재시도
-            except Exception:
-                time.sleep(2 ** retry)
-        
-        if not success or not res: break # 3번 다 실패하면 그제서야 눈물을 머금고 포기
-        
-        try:
-            root = ET.fromstring(res.content)
-            result_code = root.findtext('.//resultCode')
-            if result_code not in ['00', '0']: break
+                root = ET.fromstring(res.content)
+                result_code = root.findtext('.//resultCode')
+                if result_code not in ['00', '0']: break
 
-            total_count = int(root.findtext('.//totalCount') or 0)
-            if total_count == 0: break
+                total_count = int(root.findtext('.//totalCount') or 0)
+                if total_count == 0: break
 
-            items = root.findall('.//item')
-            if not items: break
-            
-            for item in items:
-                # 💡 [핵심 3] 네 말대로 어차피 3자단가 계약이니 조건문 다 철거! 타겟 업체면 무조건 쓸어담음.
-                norm_corp = normalize_corp_name(item.findtext('corpNm', ''))
+                items = root.findall('.//item')
+                if not items: break
                 
-                if norm_corp in TARGET_MAP:
-                    date_val = (item.findtext('dlvrReqRcptDate') or item.findtext('dlvrReqDate', '')).replace('-', '')[:8]
-                    api_month_str = f"{int(date_val[4:6])}월" if len(date_val) >= 6 else "4월"
+                for item in items:
+                    norm_corp = normalize_corp_name(item.findtext('corpNm', ''))
                     
-                    amt_str = item.findtext('dlvrReqAmt', '0')
-                    if not amt_str or str(amt_str).strip() == '': amt_str = '0'
-                    
-                    req_no = item.findtext('dlvrReqNo', '').strip()
-                    item_name = item.findtext('prdctClsfcNm', '') or item.findtext('dtilPrdctClsfcNm', '')
-                    
-                    all_new_data.append({
-                        '업체명': TARGET_MAP[norm_corp], 
-                        '물품분류명': item_name, 
-                        '금액': float(amt_str), 
-                        '납품요구번호': req_no if req_no else f'API_{time.time()}', 
-                        '월': api_month_str,
-                        'MAS여부': 'Y' 
-                    })
-                    added_count += 1
-            
-            if page_no * 100 >= total_count: break
-            page_no += 1
-            
-        except Exception: break
+                    if norm_corp in TARGET_MAP:
+                        date_val = (item.findtext('dlvrReqRcptDate') or item.findtext('dlvrReqDate', '')).replace('-', '')[:8]
+                        api_month_str = f"{int(date_val[4:6])}월" if len(date_val) >= 6 else "4월"
+                        
+                        amt_str = item.findtext('dlvrReqAmt', '0')
+                        if not amt_str or str(amt_str).strip() == '': amt_str = '0'
+                        
+                        req_no = item.findtext('dlvrReqNo', '').strip()
+                        item_name = item.findtext('prdctClsfcNm', '') or item.findtext('dtilPrdctClsfcNm', '')
+                        
+                        # 💡 [핵심 2] 버리지 않고 '분류'만 한다! (MAS vs 우수조달)
+                        cntrct_stle = item.findtext('cntrctCnclsStleNm', '')
+                        mas_flag = 'Y' if any(k in cntrct_stle for k in ['다수공급자', 'MAS', 'mas']) else 'N'
+                        
+                        all_new_data.append({
+                            '업체명': TARGET_MAP[norm_corp], 
+                            '물품분류명': item_name, 
+                            '금액': float(amt_str), 
+                            '납품요구번호': req_no if req_no else f'API_{time.time()}', 
+                            '월': api_month_str,
+                            'MAS여부': mas_flag 
+                        })
+                        added_count += 1
+                
+                if page_no * 999 >= total_count: break
+                page_no += 1
+                
+            except Exception: break
 
     if all_new_data:
         return pd.DataFrame(all_new_data), f"🟢 실시간 데이터 수집 성공! (신규 {added_count}건)"
@@ -203,7 +208,7 @@ def get_processed_data_raw():
 df_total, api_msg = get_processed_data_raw()
 
 # --- 6. UI ---
-st.markdown(f"<div class='main-title'>🏆 조달청 통합 대시보드 v58.0 (과거 해법 완벽 적용)</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='main-title'>🏆 조달청 통합 대시보드 v59.0 (실시간 퍼펙트 연동판)</div>", unsafe_allow_html=True)
 col_head1, col_head2 = st.columns([5, 1])
 with col_head1: st.markdown(f"<div class='update-time'>🕒 상태: {api_msg}</div>", unsafe_allow_html=True)
 with col_head2: 
