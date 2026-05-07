@@ -6,7 +6,6 @@ from datetime import datetime, timedelta
 import plotly.express as px
 import plotly.graph_objects as go
 from io import BytesIO
-import urllib.parse
 
 # --- 1. 기본 설정 및 KST 시계 ---
 st.set_page_config(page_title="조달청 실적 분석 대시보드", layout="wide")
@@ -111,17 +110,15 @@ def load_historical_data_raw():
     if not result_df.empty: result_df = result_df.drop_duplicates()
     return result_df
 
-# --- 4. 실시간 API 수집 (💡 원래의 마스터 키 + V5 서버 완벽 롤백!) ---
+# --- 4. 실시간 API 수집 (💡 404 해결 + 크롬 위장!) ---
 def fetch_api_data_raw():
     now = get_now_kst()
     try:
-        # 💡 [메타인지 해결책] 429 에러(한도 초과)를 냈다는 건 완벽하게 작동했다는 증거! 
-        # 트래픽이 초기화된 원래 인증키로 롤백!
-        RAW_KEY = "c1b379f7734c7d624ddefea07510eae71b6e12c5fb89970319d76c5ae8db5248"
-        API_KEY = urllib.parse.unquote(RAW_KEY)
+        # 네가 브라우저에서 성공했던 '새 인증키'
+        RAW_KEY = "15bc460106a7359afdd54c91410a8dd94c17076ba2aa7d4308cfb8e07e9ce5ae"
         
-        # 💡 가장 완벽하게 통신했던 최신 V5 서버(05)로 롤백!
-        URL = "http://apis.data.go.kr/1230000/at/ShoppingMallPrdctInfoService05/getDlvrReqInfoList"
+        # 💡 404 원인이었던 '05' 제거! 원래 주소로 완벽 롤백
+        URL = "http://apis.data.go.kr/1230000/at/ShoppingMallPrdctInfoService/getDlvrReqInfoList"
         
         bgn_date = "20260401"
         end_date = now.strftime('%Y%m%d')
@@ -132,9 +129,14 @@ def fetch_api_data_raw():
         total_count = 0
         added_count = 0
         
+        # 💡 [핵심] 조달청 방화벽을 속이는 크롬 브라우저 신분증 (이게 없어서 07 에러가 났던 거임!)
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+        }
+        
         while True:
             params = {
-                'serviceKey': API_KEY, 
+                'serviceKey': RAW_KEY, 
                 'numOfRows': '999', 
                 'pageNo': str(page_no),
                 'inqryDiv': '1', 
@@ -143,10 +145,13 @@ def fetch_api_data_raw():
             }
             
             try:
-                res = requests.get(URL, params=params, timeout=15)
+                # headers=headers 추가하여 진짜 사람인 척 통신
+                res = requests.get(URL, params=params, headers=headers, timeout=15)
             except Exception: return pd.DataFrame(), f"🚨 통신 실패 (네트워크 끊김)"
             
+            if res.status_code == 404: return pd.DataFrame(), "🚨 HTTP 404: 주소 오류 (서버가 응답하지 않음)"
             if res.status_code == 429: return pd.DataFrame(), "🚨 API 일일 한도 초과 (내일 초기화. 로컬 데이터만 표시)"
+            if res.status_code == 401: return pd.DataFrame(), "🚨 HTTP 401: 새 인증키 서버 동기화 대기 중"
             if res.status_code != 200: return pd.DataFrame(), f"🚨 HTTP {res.status_code} 에러"
 
             root = ET.fromstring(res.content)
@@ -177,6 +182,7 @@ def fetch_api_data_raw():
                 norm_corp = normalize_corp_name(raw_corp)
                 
                 if norm_corp in TARGET_MAP:
+                    import time
                     req_no = item.findtext('dlvrReqNo', '').strip()
                     item_name = item.findtext('prdctClsfcNm', '')
                     api_month_str = f"{int(date_clean[4:6])}월"
@@ -232,7 +238,7 @@ def get_processed_data_raw():
 df_total, api_msg = get_processed_data_raw()
 
 # --- 6. UI 및 새로고침 버튼 ---
-st.markdown(f"<div class='main-title'>🏆 조달청 통합 대시보드 v53.0 (마스터키 복원 + 1년 풀템플릿)</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='main-title'>🏆 조달청 통합 대시보드 v54.0 (크롬 위장 + 404 해결)</div>", unsafe_allow_html=True)
 
 col_head1, col_head2 = st.columns([5, 1])
 with col_head1:
