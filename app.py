@@ -22,7 +22,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- 2. 분석 대상 업체 및 제외 품목 세팅 (V31 블랙리스트 롤백!) ---
+# --- 2. 분석 대상 업체 및 제외 품목 세팅 (V31 블랙리스트) ---
 TARGET_COMPANIES = [
     "주식회사 티제이원", "주식회사 파로스", "주식회사 포딕스시스템", "주식회사 세오", 
     "주식회사 펜타게이트", "주식회사 홍석", "주식회사 솔디아", "주식회사 정현씨앤씨", "주식회사 디라직", 
@@ -111,13 +111,14 @@ def load_historical_data_raw():
     if not result_df.empty: result_df = result_df.drop_duplicates()
     return result_df
 
-# --- 4. 실시간 API 수집 (💡 잃어버린 V5 '05' 주소 복구!!!) ---
+# --- 4. 실시간 API 수집 (💡 404 해결! 05 제거하고 쌩얼 주소 + 다이렉트 키 결합) ---
 def fetch_api_data_raw():
     now = get_now_kst()
     try:
         RAW_KEY = "15bc460106a7359afdd54c91410a8dd94c17076ba2aa7d4308cfb8e07e9ce5ae"
-        # 💡 [핵심] ShoppingMallPrdctInfoService -> ShoppingMallPrdctInfoService05 로 완벽 복구
-        URL = f"http://apis.data.go.kr/1230000/at/ShoppingMallPrdctInfoService05/getDlvrReqInfoList?serviceKey={RAW_KEY}"
+        
+        # 💡 [핵심] 쓸데없는 '05' 제거! 크롬에서 성공했던 원래 주소 그대로 복구!
+        URL = f"http://apis.data.go.kr/1230000/at/ShoppingMallPrdctInfoService/getDlvrReqInfoList?serviceKey={RAW_KEY}"
         
         bgn_date = "20260401"
         end_date = now.strftime('%Y%m%d')
@@ -129,6 +130,7 @@ def fetch_api_data_raw():
         added_count = 0
         
         while True:
+            # 인증키는 URL에 붙였으므로, 파라미터에는 날짜와 페이지만 전송
             params = {
                 'numOfRows': '999', 'pageNo': str(page_no),
                 'inqryDiv': '1', 'inqryBgnDate': bgn_date, 'inqryEndDate': end_date
@@ -138,6 +140,7 @@ def fetch_api_data_raw():
                 res = requests.get(URL, params=params, timeout=15)
             except Exception: return pd.DataFrame(), f"🚨 통신 실패 (네트워크 끊김)"
             
+            if res.status_code == 404: return pd.DataFrame(), "🚨 HTTP 404: 주소 오류 (서버가 응답하지 않음)"
             if res.status_code == 429: return pd.DataFrame(), "🚨 API 일일 한도 초과 (내일 초기화. 로컬 데이터만 표시)"
             if res.status_code == 401: return pd.DataFrame(), "🚨 HTTP 401: 새 인증키 서버 동기화 대기 중"
             if res.status_code != 200: return pd.DataFrame(), f"🚨 HTTP {res.status_code} 에러"
@@ -216,7 +219,6 @@ def get_processed_data_raw():
     else:
         df_total = df_hist.copy()
 
-    # 💡 37개 쓰레기 품목 제거 (블랙리스트)
     if not df_total.empty and '물품분류명' in df_total.columns:
         pattern = '|'.join(EXCLUDE_ITEMS)
         df_total = df_total[~df_total['물품분류명'].astype(str).str.contains(pattern, na=False, regex=True)]
@@ -226,7 +228,7 @@ def get_processed_data_raw():
 df_total, api_msg = get_processed_data_raw()
 
 # --- 6. UI 및 새로고침 버튼 ---
-st.markdown(f"<div class='main-title'>🏆 조달청 통합 대시보드 v50.0 (최신 V5서버 + 1년 풀템플릿)</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='main-title'>🏆 조달청 통합 대시보드 v51.0 (404 픽스 + 1년 풀템플릿)</div>", unsafe_allow_html=True)
 
 col_head1, col_head2 = st.columns([5, 1])
 with col_head1:
@@ -319,7 +321,6 @@ else:
 
     st.markdown("---")
 
-    # 💡 1년치 풀-스케일 보드
     def render_ranking_board(df_data, title, show_count_col, sort_key, dl_key, cmap_color='Blues'):
         st.subheader(title)
         ctrl_col1, ctrl_col2 = st.columns([2.4, 1])
