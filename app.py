@@ -111,13 +111,13 @@ def load_historical_data_raw():
     if not result_df.empty: result_df = result_df.drop_duplicates()
     return result_df
 
-# --- 4. 실시간 API 수집 (💡 API 인코딩 강제 우회!) ---
+# --- 4. 실시간 API 수집 (💡 잃어버린 V5 '05' 주소 복구!!!) ---
 def fetch_api_data_raw():
     now = get_now_kst()
     try:
         RAW_KEY = "15bc460106a7359afdd54c91410a8dd94c17076ba2aa7d4308cfb8e07e9ce5ae"
-        # 💡 [07 에러 뚫기] requests가 인코딩 못하게 URL에 직접 인증키 결합!
-        URL = f"http://apis.data.go.kr/1230000/at/ShoppingMallPrdctInfoService/getDlvrReqInfoList?serviceKey={RAW_KEY}"
+        # 💡 [핵심] ShoppingMallPrdctInfoService -> ShoppingMallPrdctInfoService05 로 완벽 복구
+        URL = f"http://apis.data.go.kr/1230000/at/ShoppingMallPrdctInfoService05/getDlvrReqInfoList?serviceKey={RAW_KEY}"
         
         bgn_date = "20260401"
         end_date = now.strftime('%Y%m%d')
@@ -129,7 +129,6 @@ def fetch_api_data_raw():
         added_count = 0
         
         while True:
-            # params에서 serviceKey 제외 (이미 URL에 박았으므로)
             params = {
                 'numOfRows': '999', 'pageNo': str(page_no),
                 'inqryDiv': '1', 'inqryBgnDate': bgn_date, 'inqryEndDate': end_date
@@ -192,7 +191,7 @@ def fetch_api_data_raw():
             page_no += 1
 
         if all_new_data:
-            return pd.DataFrame(all_new_data), f"🟢 신규 실시간 데이터 수집 성공! (4/20 이후 {added_count}건)"
+            return pd.DataFrame(all_new_data), f"🟢 신규 데이터 수집 성공! (4/20 이후 {added_count}건)"
         return pd.DataFrame(), f"🔵 최신화 완료 (4/20 이후 추가 실적 없음)"
         
     except Exception: return pd.DataFrame(), f"⚠️ 파싱 에러"
@@ -217,6 +216,7 @@ def get_processed_data_raw():
     else:
         df_total = df_hist.copy()
 
+    # 💡 37개 쓰레기 품목 제거 (블랙리스트)
     if not df_total.empty and '물품분류명' in df_total.columns:
         pattern = '|'.join(EXCLUDE_ITEMS)
         df_total = df_total[~df_total['물품분류명'].astype(str).str.contains(pattern, na=False, regex=True)]
@@ -225,8 +225,8 @@ def get_processed_data_raw():
 
 df_total, api_msg = get_processed_data_raw()
 
-# --- 6. UI ---
-st.markdown(f"<div class='main-title'>🏆 조달청 통합 대시보드 v49.0 (API 강제 우회 + 1년 풀템플릿)</div>", unsafe_allow_html=True)
+# --- 6. UI 및 새로고침 버튼 ---
+st.markdown(f"<div class='main-title'>🏆 조달청 통합 대시보드 v50.0 (최신 V5서버 + 1년 풀템플릿)</div>", unsafe_allow_html=True)
 
 col_head1, col_head2 = st.columns([5, 1])
 with col_head1:
@@ -235,7 +235,7 @@ with col_head2:
     if st.button("🔄 즉시 새로고침", use_container_width=True):
         st.rerun()
 
-# --- 7. 사이드바 ---
+# --- 7. 사이드바 필터 ---
 with st.sidebar:
     st.header("🔍 품목 상세 필터")
     if df_total.empty:
@@ -256,7 +256,7 @@ with st.sidebar:
             if cb_key not in st.session_state: st.session_state[cb_key] = True
             if st.checkbox(item, key=cb_key): selected_items.append(item)
 
-# --- 8. 메인 ---
+# --- 8. 메인 화면 (요약 & 차트) ---
 if not selected_items:
     st.info("👈 왼쪽 사이드바에서 분석할 품목을 1개 이상 선택해주세요.")
 else:
