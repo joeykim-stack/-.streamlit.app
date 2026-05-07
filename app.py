@@ -7,7 +7,6 @@ import plotly.express as px
 import plotly.graph_objects as go
 from io import BytesIO
 import time
-import re
 
 # --- 1. 기본 설정 및 KST 시계 ---
 st.set_page_config(page_title="조달청 실적 분석 대시보드", layout="wide")
@@ -17,13 +16,13 @@ def get_now_kst():
 
 st.markdown("""
     <style>
-    .main-title { font-size: 2.2rem; font-weight: 800; color: #1e3a8a; margin-bottom: 0.5rem; }
+    .main-title { font-size: 2.2rem; font-weight: 800; margin-bottom: 0.5rem; }
     .update-time { color: #6c757d; font-size: 0.9rem; margin-bottom: 2rem; }
     .stCheckbox { margin-bottom: -15px; }
     </style>
 """, unsafe_allow_html=True)
 
-# --- 2. 분석 대상 업체 및 화이트리스트 세팅 ---
+# --- 2. 분석 대상 업체 및 제외 품목 세팅 (V31 블랙리스트 롤백!) ---
 TARGET_COMPANIES = [
     "주식회사 티제이원", "주식회사 파로스", "주식회사 포딕스시스템", "주식회사 세오", 
     "주식회사 펜타게이트", "주식회사 홍석", "주식회사 솔디아", "주식회사 정현씨앤씨", "주식회사 디라직", 
@@ -57,7 +56,7 @@ def normalize_corp_name(name):
 
 TARGET_MAP = {normalize_corp_name(comp): comp for comp in TARGET_COMPANIES}
 
-# --- 3. 로컬 데이터 로드 (V31 무결점 파서 적용) ---
+# --- 3. 로컬 데이터 로드 (물품분류명 & 무결점 파서 적용) ---
 def load_historical_data_raw():
     file_month_map = {'data.csv': '1월', 'data02.csv': '2월', 'data02.cvs': '2월', 'data03.csv': '3월', 'data04.csv': '4월'}
     dfs = []
@@ -112,12 +111,12 @@ def load_historical_data_raw():
     if not result_df.empty: result_df = result_df.drop_duplicates()
     return result_df
 
-# --- 4. 실시간 API 수집 (💡 파이썬 강제 인코딩 우회!) ---
+# --- 4. 실시간 API 수집 (💡 API 인코딩 강제 우회!) ---
 def fetch_api_data_raw():
     now = get_now_kst()
     try:
         RAW_KEY = "15bc460106a7359afdd54c91410a8dd94c17076ba2aa7d4308cfb8e07e9ce5ae"
-        # 💡 [핵심 해결책] URL에 인증키를 직접 결합하여 requests의 자동 인코딩 개입을 원천 차단!
+        # 💡 [07 에러 뚫기] requests가 인코딩 못하게 URL에 직접 인증키 결합!
         URL = f"http://apis.data.go.kr/1230000/at/ShoppingMallPrdctInfoService/getDlvrReqInfoList?serviceKey={RAW_KEY}"
         
         bgn_date = "20260401"
@@ -130,7 +129,7 @@ def fetch_api_data_raw():
         added_count = 0
         
         while True:
-            # serviceKey를 params에서 제외하고 나머지 필수 조건만 전달
+            # params에서 serviceKey 제외 (이미 URL에 박았으므로)
             params = {
                 'numOfRows': '999', 'pageNo': str(page_no),
                 'inqryDiv': '1', 'inqryBgnDate': bgn_date, 'inqryEndDate': end_date
@@ -193,7 +192,7 @@ def fetch_api_data_raw():
             page_no += 1
 
         if all_new_data:
-            return pd.DataFrame(all_new_data), f"🟢 신규 데이터 수집 성공! (4/20 이후 {added_count}건)"
+            return pd.DataFrame(all_new_data), f"🟢 신규 실시간 데이터 수집 성공! (4/20 이후 {added_count}건)"
         return pd.DataFrame(), f"🔵 최신화 완료 (4/20 이후 추가 실적 없음)"
         
     except Exception: return pd.DataFrame(), f"⚠️ 파싱 에러"
@@ -218,7 +217,6 @@ def get_processed_data_raw():
     else:
         df_total = df_hist.copy()
 
-    # 💡 37개 쓰레기 품목 제거 (블랙리스트)
     if not df_total.empty and '물품분류명' in df_total.columns:
         pattern = '|'.join(EXCLUDE_ITEMS)
         df_total = df_total[~df_total['물품분류명'].astype(str).str.contains(pattern, na=False, regex=True)]
@@ -227,8 +225,8 @@ def get_processed_data_raw():
 
 df_total, api_msg = get_processed_data_raw()
 
-# --- 6. UI 및 새로고침 버튼 ---
-st.markdown(f"<div class='main-title'>🏆 조달청 통합 대시보드 v49.0 (API 인코딩 우회 + 1년 풀템플릿)</div>", unsafe_allow_html=True)
+# --- 6. UI ---
+st.markdown(f"<div class='main-title'>🏆 조달청 통합 대시보드 v49.0 (API 강제 우회 + 1년 풀템플릿)</div>", unsafe_allow_html=True)
 
 col_head1, col_head2 = st.columns([5, 1])
 with col_head1:
@@ -237,7 +235,7 @@ with col_head2:
     if st.button("🔄 즉시 새로고침", use_container_width=True):
         st.rerun()
 
-# --- 7. 사이드바 필터 ---
+# --- 7. 사이드바 ---
 with st.sidebar:
     st.header("🔍 품목 상세 필터")
     if df_total.empty:
@@ -258,7 +256,7 @@ with st.sidebar:
             if cb_key not in st.session_state: st.session_state[cb_key] = True
             if st.checkbox(item, key=cb_key): selected_items.append(item)
 
-# --- 8. 메인 화면 (요약 & 차트) ---
+# --- 8. 메인 ---
 if not selected_items:
     st.info("👈 왼쪽 사이드바에서 분석할 품목을 1개 이상 선택해주세요.")
 else:
@@ -321,6 +319,7 @@ else:
 
     st.markdown("---")
 
+    # 💡 1년치 풀-스케일 보드
     def render_ranking_board(df_data, title, show_count_col, sort_key, dl_key, cmap_color='Blues'):
         st.subheader(title)
         ctrl_col1, ctrl_col2 = st.columns([2.4, 1])
