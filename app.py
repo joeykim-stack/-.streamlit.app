@@ -22,7 +22,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- 2. 분석 대상 업체 및 제외 품목 세팅 (V31 블랙리스트) ---
+# --- 2. 분석 대상 업체 및 제외 품목 세팅 (V31 블랙리스트 롤백!) ---
 TARGET_COMPANIES = [
     "주식회사 티제이원", "주식회사 파로스", "주식회사 포딕스시스템", "주식회사 세오", 
     "주식회사 펜타게이트", "주식회사 홍석", "주식회사 솔디아", "주식회사 정현씨앤씨", "주식회사 디라직", 
@@ -111,14 +111,12 @@ def load_historical_data_raw():
     if not result_df.empty: result_df = result_df.drop_duplicates()
     return result_df
 
-# --- 4. 실시간 API 수집 (💡 404 해결! 05 제거하고 쌩얼 주소 + 다이렉트 키 결합) ---
+# --- 4. 실시간 API 수집 (💡 파이썬 개입 0% 완전 수동 URL 결합) ---
 def fetch_api_data_raw():
     now = get_now_kst()
     try:
         RAW_KEY = "15bc460106a7359afdd54c91410a8dd94c17076ba2aa7d4308cfb8e07e9ce5ae"
-        
-        # 💡 [핵심] 쓸데없는 '05' 제거! 크롬에서 성공했던 원래 주소 그대로 복구!
-        URL = f"http://apis.data.go.kr/1230000/at/ShoppingMallPrdctInfoService/getDlvrReqInfoList?serviceKey={RAW_KEY}"
+        BASE_URL = "http://apis.data.go.kr/1230000/at/ShoppingMallPrdctInfoService/getDlvrReqInfoList"
         
         bgn_date = "20260401"
         end_date = now.strftime('%Y%m%d')
@@ -130,14 +128,12 @@ def fetch_api_data_raw():
         added_count = 0
         
         while True:
-            # 인증키는 URL에 붙였으므로, 파라미터에는 날짜와 페이지만 전송
-            params = {
-                'numOfRows': '999', 'pageNo': str(page_no),
-                'inqryDiv': '1', 'inqryBgnDate': bgn_date, 'inqryEndDate': end_date
-            }
+            # 💡 [핵심 해결책] requests의 params 속성을 아예 쓰지 않고, 통짜 URL을 직접 제작해서 날림!
+            req_url = f"{BASE_URL}?serviceKey={RAW_KEY}&numOfRows=999&pageNo={page_no}&inqryDiv=1&inqryBgnDate={bgn_date}&inqryEndDate={end_date}"
             
             try:
-                res = requests.get(URL, params=params, timeout=15)
+                # params 없이 req_url 문자열 자체를 던짐! (크롬 브라우저랑 100% 동일한 환경)
+                res = requests.get(req_url, timeout=15)
             except Exception: return pd.DataFrame(), f"🚨 통신 실패 (네트워크 끊김)"
             
             if res.status_code == 404: return pd.DataFrame(), "🚨 HTTP 404: 주소 오류 (서버가 응답하지 않음)"
@@ -228,7 +224,7 @@ def get_processed_data_raw():
 df_total, api_msg = get_processed_data_raw()
 
 # --- 6. UI 및 새로고침 버튼 ---
-st.markdown(f"<div class='main-title'>🏆 조달청 통합 대시보드 v51.0 (404 픽스 + 1년 풀템플릿)</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='main-title'>🏆 조달청 통합 대시보드 v52.0 (API 강제 통신판)</div>", unsafe_allow_html=True)
 
 col_head1, col_head2 = st.columns([5, 1])
 with col_head1:
