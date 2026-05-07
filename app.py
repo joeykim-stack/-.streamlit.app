@@ -7,7 +7,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from io import BytesIO
 import time
-import urllib.parse
+import re
 
 # --- 1. 기본 설정 및 KST 시계 ---
 st.set_page_config(page_title="조달청 실적 분석 대시보드", layout="wide")
@@ -17,13 +17,13 @@ def get_now_kst():
 
 st.markdown("""
     <style>
-    .main-title { font-size: 2.2rem; font-weight: 800; margin-bottom: 0.5rem; }
+    .main-title { font-size: 2.2rem; font-weight: 800; color: #1e3a8a; margin-bottom: 0.5rem; }
     .update-time { color: #6c757d; font-size: 0.9rem; margin-bottom: 2rem; }
     .stCheckbox { margin-bottom: -15px; }
     </style>
 """, unsafe_allow_html=True)
 
-# --- 2. 분석 대상 업체 및 제외 품목 세팅 (V31 블랙리스트 롤백!) ---
+# --- 2. 분석 대상 업체 및 화이트리스트 세팅 ---
 TARGET_COMPANIES = [
     "주식회사 티제이원", "주식회사 파로스", "주식회사 포딕스시스템", "주식회사 세오", 
     "주식회사 펜타게이트", "주식회사 홍석", "주식회사 솔디아", "주식회사 정현씨앤씨", "주식회사 디라직", 
@@ -57,7 +57,7 @@ def normalize_corp_name(name):
 
 TARGET_MAP = {normalize_corp_name(comp): comp for comp in TARGET_COMPANIES}
 
-# --- 3. 로컬 데이터 로드 (물품분류명 & 무결점 파서 적용) ---
+# --- 3. 로컬 데이터 로드 (V31 무결점 파서 적용) ---
 def load_historical_data_raw():
     file_month_map = {'data.csv': '1월', 'data02.csv': '2월', 'data02.cvs': '2월', 'data03.csv': '3월', 'data04.csv': '4월'}
     dfs = []
@@ -80,7 +80,6 @@ def load_historical_data_raw():
 
             df[req_col] = df[req_col].fillna('').astype(str).str.replace('nan', '', regex=False).str.replace(r'\.0$', '', regex=True).str.strip()
 
-            # 💡 [슈퍼 파서 엔진] 원본을 덮어쓰지 않고 진짜 금액만 쏙 빼옴
             calc_amt = pd.Series(0.0, index=df.index)
             for col in ['납품요구금액', '금액', '납품금액']:
                 if col in df.columns:
@@ -113,13 +112,13 @@ def load_historical_data_raw():
     if not result_df.empty: result_df = result_df.drop_duplicates()
     return result_df
 
-# --- 4. 실시간 API 수집 (새 인증키 + 날짜 버그 픽스) ---
+# --- 4. 실시간 API 수집 (💡 파이썬 강제 인코딩 우회!) ---
 def fetch_api_data_raw():
     now = get_now_kst()
     try:
         RAW_KEY = "15bc460106a7359afdd54c91410a8dd94c17076ba2aa7d4308cfb8e07e9ce5ae"
-        API_KEY = urllib.parse.unquote(RAW_KEY)
-        URL = "http://apis.data.go.kr/1230000/at/ShoppingMallPrdctInfoService/getDlvrReqInfoList"
+        # 💡 [핵심 해결책] URL에 인증키를 직접 결합하여 requests의 자동 인코딩 개입을 원천 차단!
+        URL = f"http://apis.data.go.kr/1230000/at/ShoppingMallPrdctInfoService/getDlvrReqInfoList?serviceKey={RAW_KEY}"
         
         bgn_date = "20260401"
         end_date = now.strftime('%Y%m%d')
@@ -131,8 +130,9 @@ def fetch_api_data_raw():
         added_count = 0
         
         while True:
+            # serviceKey를 params에서 제외하고 나머지 필수 조건만 전달
             params = {
-                'serviceKey': API_KEY, 'numOfRows': '999', 'pageNo': str(page_no),
+                'numOfRows': '999', 'pageNo': str(page_no),
                 'inqryDiv': '1', 'inqryBgnDate': bgn_date, 'inqryEndDate': end_date
             }
             
@@ -141,7 +141,7 @@ def fetch_api_data_raw():
             except Exception: return pd.DataFrame(), f"🚨 통신 실패 (네트워크 끊김)"
             
             if res.status_code == 429: return pd.DataFrame(), "🚨 API 일일 한도 초과 (내일 초기화. 로컬 데이터만 표시)"
-            if res.status_code == 401: return pd.DataFrame(), "🚨 HTTP 401: 새 인증키 서버 동기화 대기 중 (1~2시간 소요)"
+            if res.status_code == 401: return pd.DataFrame(), "🚨 HTTP 401: 새 인증키 서버 동기화 대기 중"
             if res.status_code != 200: return pd.DataFrame(), f"🚨 HTTP {res.status_code} 에러"
 
             root = ET.fromstring(res.content)
@@ -173,10 +173,7 @@ def fetch_api_data_raw():
                 
                 if norm_corp in TARGET_MAP:
                     req_no = item.findtext('dlvrReqNo', '').strip()
-                    
-                    # 💡 V31 시절처럼 API에서도 '물품분류명'으로 통일!
                     item_name = item.findtext('prdctClsfcNm', '')
-                    
                     api_month_str = f"{int(date_clean[4:6])}월"
                     
                     amt_str = item.findtext('dlvrReqAmt', '0')
@@ -196,8 +193,8 @@ def fetch_api_data_raw():
             page_no += 1
 
         if all_new_data:
-            return pd.DataFrame(all_new_data), f"🟢 4/20 이후 실적 {added_count}건 수집!"
-        return pd.DataFrame(), f"🔵 스캔 완료 (4/20 이후 실적 없음)"
+            return pd.DataFrame(all_new_data), f"🟢 신규 데이터 수집 성공! (4/20 이후 {added_count}건)"
+        return pd.DataFrame(), f"🔵 최신화 완료 (4/20 이후 추가 실적 없음)"
         
     except Exception: return pd.DataFrame(), f"⚠️ 파싱 에러"
 
@@ -221,7 +218,7 @@ def get_processed_data_raw():
     else:
         df_total = df_hist.copy()
 
-    # 💡 [V31의 완벽했던 블랙리스트 방식] 37개 쓰레기 품목만 제거!
+    # 💡 37개 쓰레기 품목 제거 (블랙리스트)
     if not df_total.empty and '물품분류명' in df_total.columns:
         pattern = '|'.join(EXCLUDE_ITEMS)
         df_total = df_total[~df_total['물품분류명'].astype(str).str.contains(pattern, na=False, regex=True)]
@@ -231,7 +228,7 @@ def get_processed_data_raw():
 df_total, api_msg = get_processed_data_raw()
 
 # --- 6. UI 및 새로고침 버튼 ---
-st.markdown(f"<div class='main-title'>🏆 조달청 제3자단가계약 통합 대시보드 v48.0 (1년치 풀-스케일 템플릿)</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='main-title'>🏆 조달청 통합 대시보드 v49.0 (API 인코딩 우회 + 1년 풀템플릿)</div>", unsafe_allow_html=True)
 
 col_head1, col_head2 = st.columns([5, 1])
 with col_head1:
@@ -267,7 +264,6 @@ if not selected_items:
 else:
     df_f = df_total[df_total['물품분류명'].isin(selected_items)].copy()
     
-    # 💡 [분기 자동 계산기] 1년 내내 대응 가능
     def get_quarter(month_str):
         m = int(month_str.replace('월', ''))
         if m <= 3: return '1분기'
@@ -325,7 +321,6 @@ else:
 
     st.markdown("---")
 
-    # 💡 [핵심] 1년치 풀-스케일 랭킹 보드 렌더링 함수
     def render_ranking_board(df_data, title, show_count_col, sort_key, dl_key, cmap_color='Blues'):
         st.subheader(title)
         ctrl_col1, ctrl_col2 = st.columns([2.4, 1])
@@ -335,7 +330,6 @@ else:
         p_amt = pd.pivot_table(df_data, values='금액', index='업체명', columns='월', aggfunc='sum', fill_value=0).reset_index()
         p_cnt = pd.pivot_table(df_data, values='납품요구번호', index='업체명', columns='월', aggfunc='nunique', fill_value=0).reset_index()
         
-        # 1월~12월 고정 세팅 (안 들어온 달은 0으로 채움)
         all_months = [f"{m}월" for m in range(1, 13)]
         for m in all_months:
             if m not in p_amt.columns: p_amt[m] = 0
@@ -346,7 +340,6 @@ else:
         q3_months = ['7월', '8월', '9월']
         q4_months = ['10월', '11월', '12월']
         
-        # 분기별, 전체 합계 계산
         p_amt['1분기 합계'] = p_amt[q1_months].sum(axis=1)
         p_amt['2분기 합계'] = p_amt[q2_months].sum(axis=1)
         p_amt['3분기 합계'] = p_amt[q3_months].sum(axis=1)
@@ -363,7 +356,6 @@ else:
         
         final = pd.merge(p_amt, p_cnt, on='업체명', how='outer').fillna(0)
         
-        # 컬럼 순서 (네가 요청한 완벽한 템플릿)
         disp_cols = ['업체명']
         quarters = [
             (q1_months, '1분기 합계', '1분기(건)'),
@@ -392,7 +384,6 @@ else:
         final = final.sort_values(sort_target, ascending=False).reset_index(drop=True)
         final.insert(0, '랭킹 No.', range(1, len(final) + 1))
         
-        # 💡 예쁜 색상 스타일링
         fmt_map = {c: "{:,.0f}" for c in final.columns if c not in ['랭킹 No.', '업체명']}
         styled = final.style.format(fmt_map)
         styled = styled.set_properties(subset=['업체명'], **{'background-color': 'rgba(128, 128, 128, 0.1)', 'font-weight': 'bold'})
