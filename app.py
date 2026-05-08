@@ -65,7 +65,6 @@ def unified_data_parser(df_raw, target_month=None):
     if df_raw is None or df_raw.empty: return pd.DataFrame()
     df = df_raw.copy()
 
-    # 컬럼이 없을 경우를 대비해 빈 문자열로 초기화 (에러 원천 차단)
     for req_col in ['업체명', '물품분류명', '납품요구번호']:
         if req_col not in df.columns: df[req_col] = ''
 
@@ -135,17 +134,15 @@ def load_historical_data_raw():
             if not clean_df.empty: dfs.append(clean_df)
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
-# --- 5. 실시간 API 수집 (💡 DDoS 방화벽 우회: 큼직하게 2번만 찌른다!) ---
+# --- 5. 실시간 API 수집 (💡 인간 코스프레: 초당 요청 속도 조절 장착!) ---
 def fetch_api_data_raw():
     now = get_now_kst()
-    safe_end_date = now - timedelta(days=2) # 안전하게 5/6 까지만
+    safe_end_date = now - timedelta(days=2)
     
     RAW_KEY = "15bc460106a7359afdd54c91410a8dd94c17076ba2aa7d4308cfb8e07e9ce5ae"
     BASE_URL = "http://apis.data.go.kr/1230000/at/ShoppingMallPrdctInfoService/getDlvrReqInfoList"
-    
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36'}
 
-    # 💡 [핵심] 하루씩 쪼개지 말고, 4월치 / 5월치 크게 두 덩어리로만 요청 (방화벽 통과)
     date_ranges = [
         ("20260420", "20260430"),
         ("20260501", safe_end_date.strftime("%Y%m%d"))
@@ -158,16 +155,16 @@ def fetch_api_data_raw():
         page_no = 1
         
         while True:
-            # 💡 한 번에 999건씩 크게 가져옴
             req_url = f"{BASE_URL}?serviceKey={RAW_KEY}&numOfRows=999&pageNo={page_no}&inqryDiv=1&inqryBgnDate={bgn}&inqryEndDate={end}"
             
             try:
-                # 30초 넉넉하게 줌
                 res = requests.get(req_url, headers=headers, timeout=30, verify=False)
-                if res.status_code != 200:
+                if res.status_code == 429:
+                    return pd.DataFrame(), f"🚨 429 에러: 초당 요청 속도 초과 (잠시 후 다시 시도해주세요)"
+                elif res.status_code != 200:
                     return pd.DataFrame(), f"🚨 {bgn}~{end} HTTP 에러: {res.status_code}"
             except Exception as e:
-                return pd.DataFrame(), f"🚨 서버 차단됨 (타임아웃): {str(e)}"
+                return pd.DataFrame(), f"🚨 통신 타임아웃: {str(e)}"
             
             try:
                 root = ET.fromstring(res.content)
@@ -175,13 +172,11 @@ def fetch_api_data_raw():
                     return pd.DataFrame(), f"🚨 API 거부: {root.findtext('.//resultMsg')}"
                 
                 total_count_str = root.findtext('.//totalCount')
-                if not total_count_str or int(total_count_str) == 0: 
-                    break # 해당 기간 데이터 없음
+                if not total_count_str or int(total_count_str) == 0: break
                 
                 items = root.findall('.//item')
                 if not items: break
                 
-                # 💡 [핵심] 필터 없이 API 원본 데이터를 무조건 다 쓸어 담는다
                 for item in items:
                     row_dict = {child.tag: child.text for child in item}
                     all_new_data.append(row_dict)
@@ -189,22 +184,22 @@ def fetch_api_data_raw():
                 if page_no * 999 >= int(total_count_str): break
                 page_no += 1
                 
+                # 💡 [핵심] 조달청 서버가 디도스 공격으로 오해하지 않게 1페이지 받고 1.5초 쉬어줌!
+                time.sleep(1.5)
+                
             except Exception as e:
-                return pd.DataFrame(), f"🚨 XML 데이터 변환 에러: {str(e)}"
+                return pd.DataFrame(), f"🚨 데이터 파싱 에러: {str(e)}"
 
     if not all_new_data:
-        return pd.DataFrame(), f"🔵 최신화 완료 (API 서버에 원본 실적이 0건입니다)"
+        return pd.DataFrame(), f"🔵 최신화 완료 (API 원본 실적 0건)"
         
     try:
         df_api_raw = pd.DataFrame(all_new_data)
         raw_count = len(df_api_raw)
-        
-        # 💡 [핵심] API 통데이터를 엑셀 파서에 던져서 정밀 분석
         df_api_clean = unified_data_parser(df_api_raw)
         
         if df_api_clean.empty:
-            return pd.DataFrame(), f"🔵 최신화 완료 (조달청 전체 {raw_count}건 중 타겟 52개 업체 실적은 없음)"
-            
+            return pd.DataFrame(), f"🔵 최신화 완료 (조달청 전체 {raw_count}건 중 타겟 실적 없음)"
         return df_api_clean, f"🟢 실시간 데이터 수집 성공! (전체 {raw_count}건 중 타겟실적 {len(df_api_clean)}건 추출)"
     except Exception as e:
         return pd.DataFrame(), f"🚨 통합 파이프라인 에러: {str(e)}"
@@ -213,7 +208,7 @@ def fetch_api_data_raw():
 def get_processed_data_raw():
     df_hist = load_historical_data_raw()
     
-    with st.spinner('⏳ 조달청 실시간 데이터를 안전하게 스캔 중입니다... (10~20초 소요)'):
+    with st.spinner('⏳ 사람의 속도로 안전하게 조달청 데이터를 스캔 중입니다... (약 10~30초 소요)'):
         df_api, api_msg = fetch_api_data_raw()
     
     if not df_api.empty and not df_hist.empty:
@@ -232,7 +227,7 @@ def get_processed_data_raw():
 df_total, api_msg = get_processed_data_raw()
 
 # --- 7. UI ---
-st.markdown(f"<div class='main-title'>🏆 조달청 통합 대시보드 v65.0 (방화벽 돌파 & 엑셀 파이프라인)</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='main-title'>🏆 조달청 통합 대시보드 v66.0 (인간 코스프레 429 돌파판)</div>", unsafe_allow_html=True)
 col_head1, col_head2 = st.columns([5, 1])
 with col_head1: st.markdown(f"<div class='update-time'>🕒 상태: {api_msg}</div>", unsafe_allow_html=True)
 with col_head2: 
