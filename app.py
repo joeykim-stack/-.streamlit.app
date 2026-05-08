@@ -60,7 +60,7 @@ def normalize_corp_name(name):
 
 TARGET_MAP = {normalize_corp_name(comp): comp for comp in TARGET_COMPANIES}
 
-# --- 3. 통합 파이프라인 (엑셀/API 공통 파서) ---
+# --- 3. 통합 파이프라인 ---
 def unified_data_parser(df_raw, target_month=None):
     if df_raw is None or df_raw.empty: return pd.DataFrame()
     df = df_raw.copy()
@@ -134,28 +134,26 @@ def load_historical_data_raw():
             if not clean_df.empty: dfs.append(clean_df)
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
-# --- 5. 실시간 API 수집 (💡 타임아웃의 원인 '오늘' 차단, '어제'까지만 조회!) ---
+# --- 5. 실시간 API 수집 (💡 D-2 안전 조회 + 스킵 모드) ---
 def fetch_api_data_raw():
     now = get_now_kst()
-    # 💡 [핵심] 조달청 API는 '오늘' 날짜를 요청하면 서버가 뻗음. 안전하게 어제(D-1)까지만 조회!
-    yesterday = now - timedelta(days=1)
+    # 💡 [핵심 1] 안전하게 '그저께(D-2)' 까지만 조회해서 서버 병목 원천 차단!
+    safe_end_date = now - timedelta(days=2)
     
     RAW_KEY = "15bc460106a7359afdd54c91410a8dd94c17076ba2aa7d4308cfb8e07e9ce5ae"
     BASE_URL = "http://apis.data.go.kr/1230000/at/ShoppingMallPrdctInfoService/getDlvrReqInfoList"
     
     all_new_data = []
+    failed_dates = [] # 실패한 날짜들을 기록해둘 바구니
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36'}
 
     start_date = datetime(2026, 4, 20)
     date_list = []
     current_date = start_date
     
-    # while current_date <= now: 에서 now를 yesterday로 변경!
-    while current_date <= yesterday:
+    while current_date <= safe_end_date:
         date_list.append(current_date.strftime("%Y%m%d"))
         current_date += timedelta(days=1)
-
-    status_msg = ""
 
     for target_date in date_list:
         page_no = 1
@@ -163,17 +161,18 @@ def fetch_api_data_raw():
             req_url = f"{BASE_URL}?serviceKey={RAW_KEY}&numOfRows=100&pageNo={page_no}&inqryDiv=1&inqryBgnDate={target_date}&inqryEndDate={target_date}"
             
             success, res = False, None
-            for retry in range(3): 
+            for retry in range(2): # 재시도 2번으로 축소하여 시간 단축
                 try:
-                    res = requests.get(req_url, headers=headers, timeout=15, verify=False)
+                    res = requests.get(req_url, headers=headers, timeout=10, verify=False)
                     if res.status_code == 200:
                         success = True; break
                     else: time.sleep(1)
                 except: time.sleep(1)
             
+            # 💡 [핵심 2] 특정 날짜에 서버가 뻗으면 전체 종료(break)가 아니라 다음 날짜로 넘어감(continue)!
             if not success or not res: 
-                status_msg = f"🚨 {target_date} 조회 중 통신 실패 (조달청 서버 응답없음)"
-                break 
+                failed_dates.append(target_date)
+                break # 해당 '날짜'의 조회를 포기하고 루프를 빠져나가 다음 날짜로 진행
             
             try:
                 root = ET.fromstring(res.content)
@@ -193,20 +192,20 @@ def fetch_api_data_raw():
                 page_no += 1
             except Exception: break
 
+    # 메시지 생성
+    warning_msg = f" (⚠️ 서버 불안정으로 {len(failed_dates)}일 건너뜀)" if failed_dates else ""
+
     if all_new_data:
         try:
             df_api_raw = pd.DataFrame(all_new_data)
             df_api_clean = unified_data_parser(df_api_raw)
             if df_api_clean.empty:
-                return pd.DataFrame(), f"🔵 최신화 완료 (4/20~어제 조회완료. 타겟 업체 신규실적 0건)"
-            return df_api_clean, f"🟢 실시간 데이터 수집 성공! (신규 {len(df_api_clean)}건 추가됨)"
+                return pd.DataFrame(), f"🔵 최신화 완료: 4/20~{safe_end_date.strftime('%m/%d')} 타겟업체 실적없음{warning_msg}"
+            return df_api_clean, f"🟢 실시간 데이터 수집 성공! 신규 {len(df_api_clean)}건{warning_msg}"
         except Exception as e:
             return pd.DataFrame(), f"🚨 내부 변환 에러: {str(e)}"
     
-    if status_msg: return pd.DataFrame(), status_msg
-    
-    # 💡 4/20부터 어제까지 완벽하게 스캔했지만, 타겟 업체의 진성 실적이 0건인 경우
-    return pd.DataFrame(), f"🔵 최신화 완료 (4/20~어제 조회완료. 타겟 업체 신규실적 0건)"
+    return pd.DataFrame(), f"🔵 최신화 완료: 4/20~{safe_end_date.strftime('%m/%d')} 타겟업체 실적없음{warning_msg}"
 
 # --- 6. 통합 및 필터링 ---
 def get_processed_data_raw():
@@ -231,7 +230,7 @@ def get_processed_data_raw():
 df_total, api_msg = get_processed_data_raw()
 
 # --- 7. UI ---
-st.markdown(f"<div class='main-title'>🏆 조달청 통합 대시보드 v63.0 (실시간 스캔 완료판)</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='main-title'>🏆 조달청 통합 대시보드 v64.0 (강철 멘탈 D-2판)</div>", unsafe_allow_html=True)
 col_head1, col_head2 = st.columns([5, 1])
 with col_head1: st.markdown(f"<div class='update-time'>🕒 상태: {api_msg}</div>", unsafe_allow_html=True)
 with col_head2: 
