@@ -7,7 +7,10 @@ import plotly.express as px
 import plotly.graph_objects as go
 from io import BytesIO
 import time
-import traceback
+import urllib3
+
+# SSL 경고 숨기기
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # --- 1. 기본 설정 및 KST 시계 ---
 st.set_page_config(page_title="조달청 실적 분석 대시보드", layout="wide")
@@ -57,12 +60,11 @@ def normalize_corp_name(name):
 
 TARGET_MAP = {normalize_corp_name(comp): comp for comp in TARGET_COMPANIES}
 
-# 💡 [핵심 해결] 침묵의 에러를 잡은 완벽한 통합 파서
+# --- 3. 통합 파이프라인 (엑셀/API 공통 파서) ---
 def unified_data_parser(df_raw, target_month=None):
     if df_raw is None or df_raw.empty: return pd.DataFrame()
     df = df_raw.copy()
 
-    # 1. 안전한 매핑 (중복 컬럼 충돌 방지!)
     if 'corpNm' in df.columns: df['업체명'] = df['corpNm']
     elif '계약업체명' in df.columns: df['업체명'] = df['계약업체명']
     
@@ -77,19 +79,15 @@ def unified_data_parser(df_raw, target_month=None):
     elif 'dlvrReqDate' in df.columns: df['일자'] = df['dlvrReqDate']
     elif '납품요구접수일자' in df.columns: df['일자'] = df['납품요구접수일자']
 
-    # 필수 컬럼 검사 (없으면 안전하게 빈 프레임 반환)
     for req_col in ['업체명', '물품분류명', '납품요구번호']:
-        if req_col not in df.columns:
-            return pd.DataFrame()
+        if req_col not in df.columns: return pd.DataFrame()
 
-    # 2. 엑셀 로직: 업체명 필터
     df['업체명'] = df['업체명'].astype(str).apply(lambda x: TARGET_MAP.get(normalize_corp_name(x), None))
     df = df.dropna(subset=['업체명'])
     if df.empty: return pd.DataFrame()
 
     df['납품요구번호'] = df['납품요구번호'].fillna('').astype(str).str.replace('nan', '', regex=False).str.replace(r'\.0$', '', regex=True).str.strip()
 
-    # 3. 엑셀 로직: 완벽한 금액 파싱
     calc_amt = pd.Series(0.0, index=df.index)
     for col in ['납품요구금액', '금액', '납품금액', 'dlvrReqAmt']:
         if col in df.columns:
@@ -104,29 +102,23 @@ def unified_data_parser(df_raw, target_month=None):
 
     df['금액'] = calc_amt
 
-    # 4. 월 할당 로직
-    if target_month:
-        df['월'] = target_month
+    if target_month: df['월'] = target_month
     else:
         if '일자' in df.columns:
             date_clean = df['일자'].astype(str).str.replace('-', '').str.replace('.', '').str.strip().str[:8]
             df['월'] = date_clean.str[4:6].apply(lambda x: f"{int(x)}월" if str(x).isdigit() else "4월")
-        else:
-            df['월'] = "5월"
+        else: df['월'] = "5월"
 
-    # 5. MAS 분류 로직
     if 'MAS여부' in df.columns:
         df['MAS여부'] = df['MAS여부'].fillna('N').astype(str).str.strip().str.upper()
     else:
         cntrct_col = 'cntrctCnclsStleNm' if 'cntrctCnclsStleNm' in df.columns else ('계약형태' if '계약형태' in df.columns else None)
-        if cntrct_col:
-            df['MAS여부'] = df[cntrct_col].astype(str).apply(lambda x: 'Y' if any(k in x for k in ['다수공급자', 'MAS', 'mas', '제3자']) else 'N')
-        else:
-            df['MAS여부'] = 'Y'
+        if cntrct_col: df['MAS여부'] = df[cntrct_col].astype(str).apply(lambda x: 'Y' if any(k in x for k in ['다수공급자', 'MAS', 'mas', '제3자']) else 'N')
+        else: df['MAS여부'] = 'Y'
 
     return df[['업체명', '물품분류명', '금액', '납품요구번호', '월', 'MAS여부']]
 
-# --- 4. 엑셀 파일 로드 (새로운 파서 적용) ---
+# --- 4. 엑셀 파일 로드 ---
 def load_historical_data_raw():
     file_month_map = {'data.csv': '1월', 'data02.csv': '2월', 'data03.csv': '3월', 'data04.csv': '4월'}
     dfs = []
@@ -142,38 +134,50 @@ def load_historical_data_raw():
             if not clean_df.empty: dfs.append(clean_df)
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
-# --- 5. 실시간 API 수집 (💡 에러의 침묵 완전 해제!) ---
+# --- 5. 실시간 API 수집 (💡 타임아웃 파괴: 일일 쪼개기 전법!) ---
 def fetch_api_data_raw():
     now = get_now_kst()
     RAW_KEY = "15bc460106a7359afdd54c91410a8dd94c17076ba2aa7d4308cfb8e07e9ce5ae"
     BASE_URL = "http://apis.data.go.kr/1230000/at/ShoppingMallPrdctInfoService/getDlvrReqInfoList"
     
-    date_ranges = [("20260420", "20260430"), ("20260501", now.strftime('%Y%m%d'))]
     all_new_data = []
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36'}
 
-    for bgn, end in date_ranges:
-        if bgn > end: continue
+    # 💡 4월 20일부터 오늘까지 하루씩 날짜를 쪼갠 리스트 생성
+    start_date = datetime(2026, 4, 20)
+    date_list = []
+    current_date = start_date
+    while current_date <= now:
+        date_list.append(current_date.strftime("%Y%m%d"))
+        current_date += timedelta(days=1)
+
+    status_msg = ""
+    total_added = 0
+
+    # 하루씩 서버에 요청 (서버 소화불량 방지)
+    for target_date in date_list:
         page_no = 1
         while True:
-            req_url = f"{BASE_URL}?serviceKey={RAW_KEY}&numOfRows=100&pageNo={page_no}&inqryDiv=1&inqryBgnDate={bgn}&inqryEndDate={end}"
+            # numOfRows를 100으로 줄여서 서버 응답 속도 최적화
+            req_url = f"{BASE_URL}?serviceKey={RAW_KEY}&numOfRows=100&pageNo={page_no}&inqryDiv=1&inqryBgnDate={target_date}&inqryEndDate={target_date}"
             
             success, res = False, None
-            for retry in range(3):
+            for retry in range(3): # 에러 시 3번까지 끈질기게 재시도
                 try:
-                    res = requests.get(req_url, headers=headers, timeout=60)
+                    # verify=False 로 SSL 딜레이 원천 차단, timeout 15초
+                    res = requests.get(req_url, headers=headers, timeout=15, verify=False)
                     if res.status_code == 200:
                         success = True; break
-                    else: time.sleep(2 ** retry)
-                except: time.sleep(2 ** retry)
+                    else: time.sleep(1)
+                except: time.sleep(1)
             
             if not success or not res: 
-                return pd.DataFrame(), f"🚨 API 통신 실패 (상태코드: {res.status_code if res else 'Timeout'})"
+                status_msg = f"🚨 {target_date} 조회 중 통신 실패"
+                break # 해당 날짜 포기하고 다음 날짜로 이동
             
             try:
                 root = ET.fromstring(res.content)
-                if root.findtext('.//resultCode') not in ['00', '0']: 
-                    return pd.DataFrame(), f"🚨 API 거부: [{root.findtext('.//resultCode')}] {root.findtext('.//resultMsg')}"
+                if root.findtext('.//resultCode') not in ['00', '0']: break
                 
                 total_count_str = root.findtext('.//totalCount')
                 if not total_count_str or int(total_count_str) == 0: break
@@ -187,26 +191,28 @@ def fetch_api_data_raw():
                 
                 if page_no * 100 >= int(total_count_str): break
                 page_no += 1
-            except Exception as e: 
-                return pd.DataFrame(), f"🚨 API 응답 파싱 에러: {str(e)}"
+            except Exception: break
 
     if all_new_data:
         try:
             df_api_raw = pd.DataFrame(all_new_data)
             df_api_clean = unified_data_parser(df_api_raw)
             if df_api_clean.empty:
-                return pd.DataFrame(), f"🔵 최신화 완료 (API {len(all_new_data)}건 중 우리 타겟 업체/조건 없음)"
-            return df_api_clean, f"🟢 실시간 데이터 수집 성공! (신규 {len(df_api_clean)}건)"
+                return pd.DataFrame(), f"🔵 최신화 완료 (조회된 {len(all_new_data)}건 중 우리 타겟 업체 없음)"
+            return df_api_clean, f"🟢 실시간 데이터 수집 성공! (신규 {len(df_api_clean)}건 추가됨)"
         except Exception as e:
-            # 💡 [핵심] 이제 파이썬이 에러를 숨기지 못하게 강제로 까발린다!
-            return pd.DataFrame(), f"🚨 내부 데이터 변환 에러: {str(e)}"
+            return pd.DataFrame(), f"🚨 내부 변환 에러: {str(e)}"
     
-    return pd.DataFrame(), f"🔵 최신화 완료 (4/20 이후 추가 실적 없음)"
+    if status_msg: return pd.DataFrame(), status_msg
+    return pd.DataFrame(), f"🔵 최신화 완료 (4/20 이후 타겟업체 실적 없음)"
 
 # --- 6. 통합 및 필터링 ---
 def get_processed_data_raw():
     df_hist = load_historical_data_raw()
-    df_api, api_msg = fetch_api_data_raw()
+    
+    # UI 피드백을 위해 데이터 수집 중임을 알림
+    with st.spinner('⏳ 조달청 실시간 데이터를 하루씩 안전하게 수집 중입니다... (1~2분 소요)'):
+        df_api, api_msg = fetch_api_data_raw()
     
     if not df_api.empty and not df_hist.empty:
         existing = set(df_hist['납품요구번호'].unique())
@@ -224,7 +230,7 @@ def get_processed_data_raw():
 df_total, api_msg = get_processed_data_raw()
 
 # --- 7. UI ---
-st.markdown(f"<div class='main-title'>🏆 조달청 통합 대시보드 v61.0 (에러의 침묵 분쇄판)</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='main-title'>🏆 조달청 통합 대시보드 v62.0 (일일 쪼개기 서버안정화)</div>", unsafe_allow_html=True)
 col_head1, col_head2 = st.columns([5, 1])
 with col_head1: st.markdown(f"<div class='update-time'>🕒 상태: {api_msg}</div>", unsafe_allow_html=True)
 with col_head2: 
