@@ -60,7 +60,7 @@ def normalize_corp_name(name):
 
 TARGET_MAP = {normalize_corp_name(comp): comp for comp in TARGET_COMPANIES}
 
-# --- 3. 통합 파이프라인 (에러 방어 완벽 적용) ---
+# --- 3. 통합 파이프라인 ---
 def unified_data_parser(df_raw, target_month=None):
     if df_raw is None or df_raw.empty: return pd.DataFrame()
     df = df_raw.copy()
@@ -118,7 +118,7 @@ def unified_data_parser(df_raw, target_month=None):
 
     return df[['업체명', '물품분류명', '금액', '납품요구번호', '월', 'MAS여부']]
 
-# --- 4. 엑셀 파일 로드 ---
+# --- 4. 엑셀 로컬 데이터 로드 ---
 def load_historical_data_raw():
     file_month_map = {'data.csv': '1월', 'data02.csv': '2월', 'data03.csv': '3월', 'data04.csv': '4월'}
     dfs = []
@@ -134,12 +134,14 @@ def load_historical_data_raw():
             if not clean_df.empty: dfs.append(clean_df)
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
-# --- 5. 실시간 API 수집 (💡 인간 코스프레: 초당 요청 속도 조절 장착!) ---
+# --- 5. 실시간 API 수집 (💡 429 에러 5초 대기 & 일일 한도 체크 완벽 장착!) ---
 def fetch_api_data_raw():
     now = get_now_kst()
     safe_end_date = now - timedelta(days=2)
     
-    RAW_KEY = "15bc460106a7359afdd54c91410a8dd94c17076ba2aa7d4308cfb8e07e9ce5ae"
+    # 🚨🚨🚨 [중요] 여기에 반드시 '다른(예전)' 인증키를 넣어주세요!! 🚨🚨🚨
+    RAW_KEY = "15bc460106a7359afdd54c91410a8dd94c17076ba2aa7d4308cfb8e07e9ce5ae" 
+    
     BASE_URL = "http://apis.data.go.kr/1230000/at/ShoppingMallPrdctInfoService/getDlvrReqInfoList"
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36'}
 
@@ -157,14 +159,25 @@ def fetch_api_data_raw():
         while True:
             req_url = f"{BASE_URL}?serviceKey={RAW_KEY}&numOfRows=999&pageNo={page_no}&inqryDiv=1&inqryBgnDate={bgn}&inqryEndDate={end}"
             
-            try:
-                res = requests.get(req_url, headers=headers, timeout=30, verify=False)
-                if res.status_code == 429:
-                    return pd.DataFrame(), f"🚨 429 에러: 초당 요청 속도 초과 (잠시 후 다시 시도해주세요)"
-                elif res.status_code != 200:
-                    return pd.DataFrame(), f"🚨 {bgn}~{end} HTTP 에러: {res.status_code}"
-            except Exception as e:
-                return pd.DataFrame(), f"🚨 통신 타임아웃: {str(e)}"
+            # 💡 [핵심] 429 에러 발생 시 똑똑하게 대처하는 무적의 루프
+            success = False
+            for attempt in range(3): # 최대 3번 시도
+                try:
+                    res = requests.get(req_url, headers=headers, timeout=30, verify=False)
+                    if res.status_code == 200:
+                        success = True
+                        break # 성공하면 바로 빠져나감
+                    elif res.status_code == 429:
+                        if attempt == 2: # 3번이나 429가 뜨면 진짜 일일 한도 끝난 거임
+                            return pd.DataFrame(), f"🚨 일일 트래픽 한도(429) 초과! (내일 시도하거나 코드의 인증키를 교체하세요)"
+                        time.sleep(5) # 5초 동안 숨 고르고 재시도
+                    else:
+                        time.sleep(2)
+                except Exception as e:
+                    time.sleep(2)
+                    
+            if not success:
+                return pd.DataFrame(), f"🚨 통신 불안정 (서버가 응답하지 않습니다. 잠시 후 새로고침 해주세요)"
             
             try:
                 root = ET.fromstring(res.content)
@@ -184,8 +197,8 @@ def fetch_api_data_raw():
                 if page_no * 999 >= int(total_count_str): break
                 page_no += 1
                 
-                # 💡 [핵심] 조달청 서버가 디도스 공격으로 오해하지 않게 1페이지 받고 1.5초 쉬어줌!
-                time.sleep(1.5)
+                # 다음 페이지로 넘어갈 때 2초 강제 휴식 (인간 코스프레)
+                time.sleep(2)
                 
             except Exception as e:
                 return pd.DataFrame(), f"🚨 데이터 파싱 에러: {str(e)}"
@@ -227,7 +240,7 @@ def get_processed_data_raw():
 df_total, api_msg = get_processed_data_raw()
 
 # --- 7. UI ---
-st.markdown(f"<div class='main-title'>🏆 조달청 통합 대시보드 v66.0 (인간 코스프레 429 돌파판)</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='main-title'>🏆 조달청 통합 대시보드 v67.0 (429 완벽 방어판)</div>", unsafe_allow_html=True)
 col_head1, col_head2 = st.columns([5, 1])
 with col_head1: st.markdown(f"<div class='update-time'>🕒 상태: {api_msg}</div>", unsafe_allow_html=True)
 with col_head2: 
