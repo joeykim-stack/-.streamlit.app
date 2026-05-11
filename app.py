@@ -60,7 +60,7 @@ def normalize_corp_name(name):
 
 TARGET_MAP = {normalize_corp_name(comp): comp for comp in TARGET_COMPANIES}
 
-# --- 3. 통합 파이프라인 ---
+# --- 3. 통합 파이프라인 (에러 방어 완벽 적용) ---
 def unified_data_parser(df_raw, target_month=None):
     if df_raw is None or df_raw.empty: return pd.DataFrame()
     df = df_raw.copy()
@@ -118,7 +118,7 @@ def unified_data_parser(df_raw, target_month=None):
 
     return df[['업체명', '물품분류명', '금액', '납품요구번호', '월', 'MAS여부']]
 
-# 💡 [핵심] 엑셀 데이터 로드 함수 캐싱 (1시간 유지)
+# 💡 [핵심] 엑셀은 읽는데 시간이 오래 걸리니까 캐시(기억) 적용! (체감 속도 대폭 향상)
 @st.cache_data(ttl=3600)
 def load_historical_data_raw():
     file_month_map = {'data.csv': '1월', 'data02.csv': '2월', 'data03.csv': '3월', 'data04.csv': '4월'}
@@ -135,14 +135,13 @@ def load_historical_data_raw():
             if not clean_df.empty: dfs.append(clean_df)
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
-# 💡 [핵심] API 실시간 수집 함수 캐싱 (1시간 유지)
-@st.cache_data(ttl=3600)
+# 💡 [핵심] API는 캐시(기억) 없이 무조건 실시간으로 접속!
 def fetch_api_data_raw():
     now = get_now_kst()
-    safe_end_date = now - timedelta(days=2)
+    safe_end_date = now - timedelta(days=2) # 안전하게 D-2 까지만 조회
     
-    # 사용할 인증키 확인
-    RAW_KEY = "15bc460106a7359afdd54c91410a8dd94c17076ba2aa7d4308cfb8e07e9ce5ae" 
+    # 🚨🚨🚨 [중요] 여기에 반드시 '원래 쓰던 인증키(c1b379... 풀버전)'를 넣어주세요!! 🚨🚨🚨
+    RAW_KEY = "여기에_원래_쓰던_인증키를_전체_붙여넣으세요" 
     
     BASE_URL = "http://apis.data.go.kr/1230000/at/ShoppingMallPrdctInfoService/getDlvrReqInfoList"
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36'}
@@ -170,11 +169,11 @@ def fetch_api_data_raw():
                         break 
                     elif res.status_code == 429:
                         if attempt == 2: 
-                            return pd.DataFrame(), f"🚨 일일 트래픽 한도 초과! (내일 시도해주세요)"
+                            return pd.DataFrame(), f"🚨 일일 트래픽 한도 초과! (내일 시도하거나 키를 교체하세요)"
                         time.sleep(5) 
                     else:
                         time.sleep(2)
-                except Exception as e:
+                except Exception:
                     time.sleep(2)
                     
             if not success:
@@ -198,7 +197,7 @@ def fetch_api_data_raw():
                 if page_no * 999 >= int(total_count_str): break
                 page_no += 1
                 
-                time.sleep(2)
+                time.sleep(2) # 429 에러 방지용 2초 휴식
                 
             except Exception as e:
                 return pd.DataFrame(), f"🚨 데이터 파싱 에러: {str(e)}"
@@ -221,7 +220,7 @@ def fetch_api_data_raw():
 def get_processed_data_raw():
     df_hist = load_historical_data_raw()
     
-    with st.spinner('⏳ 캐시된 데이터를 불러오거나 스캔 중입니다... (최초 1회만 시간 소요)'):
+    with st.spinner('⏳ 사람의 속도로 실시간 API를 스캔 중입니다... (약 10~30초 소요)'):
         df_api, api_msg = fetch_api_data_raw()
     
     if not df_api.empty and not df_hist.empty:
@@ -240,13 +239,11 @@ def get_processed_data_raw():
 df_total, api_msg = get_processed_data_raw()
 
 # --- 7. UI ---
-st.markdown(f"<div class='main-title'>🏆 조달청 통합 대시보드 v68.0 (초고속 캐싱 완료판)</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='main-title'>🏆 조달청 통합 대시보드 v70.0 (API 실시간 롤백 & 엑셀 가속)</div>", unsafe_allow_html=True)
 col_head1, col_head2 = st.columns([5, 1])
 with col_head1: st.markdown(f"<div class='update-time'>🕒 상태: {api_msg}</div>", unsafe_allow_html=True)
 with col_head2: 
-    # 💡 [핵심] 새로고침 버튼을 누르면 캐시를 싹 날리고 최신 데이터를 가져옴!
     if st.button("🔄 즉시 새로고침", use_container_width=True): 
-        st.cache_data.clear()
         st.rerun()
 
 with st.sidebar:
