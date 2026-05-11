@@ -1,39 +1,87 @@
 import streamlit as st
 import pandas as pd
+import requests
+import xml.etree.ElementTree as ET
+from datetime import datetime, timedelta
 import plotly.express as px
 import plotly.graph_objects as go
 from io import BytesIO
-from datetime import datetime, timedelta
+import time
+import urllib3
 import os
 
+# SSL 경고 숨기기
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# --- 1. 기본 설정 및 KST 시계 ---
 st.set_page_config(page_title="조달청 실적 분석 대시보드", layout="wide")
+
+def get_now_kst():
+    return datetime.now() + timedelta(hours=9)
 
 st.markdown("""
     <style>
     .main-title { font-size: 2.2rem; font-weight: 800; color: #1e3a8a; margin-bottom: 0.5rem; }
-    .update-time { color: #6c757d; font-size: 0.9rem; margin-bottom: 2rem; }
     .stCheckbox { margin-bottom: -15px; }
+    .status-bar { padding: 15px; border-radius: 8px; font-weight: bold; margin-bottom: 20px; text-align: center;}
+    .status-success { background-color: #dcfce7; color: #065f46; border: 1px solid #10b981; }
+    .status-warning { background-color: #fef3c7; color: #92400e; border: 1px solid #f59e0b; }
+    .status-error { background-color: #fee2e2; color: #991b1b; border: 1px solid #ef4444; }
     </style>
 """, unsafe_allow_html=True)
 
-TARGET_COMPANIES = ["주식회사 티제이원", "주식회사 파로스", "주식회사 포딕스시스템", "주식회사 세오", "주식회사 펜타게이트", "주식회사 홍석", "주식회사 솔디아", "주식회사 정현씨앤씨", "주식회사 디라직", "주식회사 새움", "주식회사 디지탈라인", "주식회사 지인테크", "(주)비엔에스테크", "주식회사 시큐인포", "주식회사 명광", "주식회사 올인원 코리아(ALL-IN-ONE KOREA CO., LTD.)", "주식회사 포커스에이아이", "주식회사 한국아이티에스", "(주)앤다스", "주식회사 다누시스", "이노뎁(주)", "주식회사 핀텔", "주식회사 오티에스", "주식회사 에스카", "에코아이넷(주)", "미르텍 주식회사", "주식회사 아이즈온솔루션", "주식회사 그린아이티코리아", "주식회사 제노시스", "(주)지성이엔지", "주식회사 알엠텍", "(주)원우이엔지", "(주)포소드", "주식회사 두원전자통신", "대신네트웍스주식회사", "주식회사 마이크로시스템", "주식회사 크리에이티브넷", "주식회사센텍", "(주)경림이앤지", "주식회사 웹게이트", "한국씨텍(주)", "뉴코리아전자통신 주식회사", "주식회사 제이한테크", "주식회사 아라드네트웍스", "주식회사 진명아이앤씨", "렉스젠 주식회사", "주식회사 디케이앤트", "사이테크놀로지스 주식회사", "주식회사 송우인포텍", "주식회사 아이엔아이", "비티에스 주식회사", "주식회사 인텔리빅스", "주식회사 비알인포텍"]
-def normalize_corp_name(name): return name.replace('주식회사', '').replace('(주)', '').replace(' ', '').strip() if name else ""
+# --- 2. 분석 대상 업체 및 제외 품목 ---
+TARGET_COMPANIES = [
+    "주식회사 티제이원", "주식회사 파로스", "주식회사 포딕스시스템", "주식회사 세오", 
+    "주식회사 펜타게이트", "주식회사 홍석", "주식회사 솔디아", "주식회사 정현씨앤씨", "주식회사 디라직", 
+    "주식회사 새움", "주식회사 디지탈라인", "주식회사 지인테크", "(주)비엔에스테크", 
+    "주식회사 시큐인포", "주식회사 명광", "주식회사 올인원 코리아(ALL-IN-ONE KOREA CO., LTD.)", 
+    "주식회사 포커스에이아이", "주식회사 한국아이티에스", "(주)앤다스", "주식회사 다누시스", 
+    "이노뎁(주)", "주식회사 핀텔", "주식회사 오티에스", "주식회사 에스카", "에코아이넷(주)", 
+    "미르텍 주식회사", "주식회사 아이즈온솔루션", "주식회사 그린아이티코리아", "주식회사 제노시스", 
+    "(주)지성이엔지", "주식회사 알엠텍", "(주)원우이엔지", "(주)포소드", "주식회사 두원전자통신", 
+    "대신네트웍스주식회사", "주식회사 마이크로시스템", "주식회사 크리에이티브넷", "주식회사센텍", 
+    "(주)경림이앤지", "주식회사 웹게이트", "한국씨텍(주)", "뉴코리아전자통신 주식회사", 
+    "주식회사 제이한테크", "주식회사 아라드네트웍스", "주식회사 진명아이앤씨", "렉스젠 주식회사", 
+    "주식회사 디케이앤트", "사이테크놀로지스 주식회사", "주식회사 송우인포텍", "주식회사 아이엔아이", 
+    "비티에스 주식회사", "주식회사 인텔리빅스", "주식회사 비알인포텍"
+]
+
+EXCLUDE_ITEMS = [
+    "무인교통감시장치", "교통관제시스템", "구내방송장치", "마이크로폰", "마이크스탠드", 
+    "무선마이크장치", "버스승강장", "보행자안전차단기", "산업제어소프트웨어", "생체인식장비", 
+    "세탁물건조기", "소프트웨어유지및지원서비스", "스트로보또는경고등", "스피커스탠드", 
+    "스피커제어유닛", "업소용세탁기", "오디오모니터", "오디오믹서", "증폭기결합", "오디오앰프", 
+    "오디오장비커넥터및스테이지박스", "이퀄라이저", "정보화교육서비스", "주차관제장치", 
+    "차량번호판독기", "출입통제시스템", "태양전지조절기", "파일시스템소프트웨어", 
+    "패키지소프트웨어개발및도입서비스", "플러그용잭", "해석또는과학소프트웨어", 
+    "화재경보장치", "콤팩트디스크재생또는녹음기", "리튬전지", "리셉터클", "라디오튜너"
+]
+
+def normalize_corp_name(name):
+    if not name: return ""
+    return name.replace('주식회사', '').replace('(주)', '').replace(' ', '').strip()
+
 TARGET_MAP = {normalize_corp_name(comp): comp for comp in TARGET_COMPANIES}
 
-EXCLUDE_ITEMS = ["무인교통감시장치", "교통관제시스템", "구내방송장치", "마이크로폰", "마이크스탠드", "무선마이크장치", "버스승강장", "보행자안전차단기", "산업제어소프트웨어", "생체인식장비", "세탁물건조기", "소프트웨어유지및지원서비스", "스트로보또는경고등", "스피커스탠드", "스피커제어유닛", "업소용세탁기", "오디오모니터", "오디오믹서", "증폭기결합", "오디오앰프", "오디오장비커넥터및스테이지박스", "이퀄라이저", "정보화교육서비스", "주차관제장치", "차량번호판독기", "출입통제시스템", "태양전지조절기", "파일시스템소프트웨어", "패키지소프트웨어개발및도입서비스", "플러그용잭", "해석또는과학소프트웨어", "화재경보장치", "콤팩트디스크재생또는녹음기", "리튬전지", "리셉터클", "라디오튜너"]
-
+# --- 3. 통합 파이프라인 ---
 def unified_data_parser(df_raw, target_month=None):
-    if df_raw.empty: return pd.DataFrame()
+    if df_raw is None or df_raw.empty: return pd.DataFrame()
     df = df_raw.copy()
+
     for req_col in ['업체명', '물품분류명', '납품요구번호']:
         if req_col not in df.columns: df[req_col] = ''
+
     if 'corpNm' in df.columns: df['업체명'] = df['corpNm']
     elif '계약업체명' in df.columns: df['업체명'] = df['계약업체명']
+    
     if 'prdctClsfcNm' in df.columns: df['물품분류명'] = df['prdctClsfcNm']
     elif 'dtilPrdctClsfcNm' in df.columns: df['물품분류명'] = df['dtilPrdctClsfcNm']
     elif '품명' in df.columns: df['물품분류명'] = df['품명']
+    
     if 'dlvrReqNo' in df.columns: df['납품요구번호'] = df['dlvrReqNo']
     elif '주문번호' in df.columns: df['납품요구번호'] = df['주문번호']
+    
     if 'dlvrReqRcptDate' in df.columns: df['일자'] = df['dlvrReqRcptDate']
     elif 'dlvrReqDate' in df.columns: df['일자'] = df['dlvrReqDate']
     elif '납품요구접수일자' in df.columns: df['일자'] = df['납품요구접수일자']
@@ -55,13 +103,14 @@ def unified_data_parser(df_raw, target_month=None):
             mod_amt = pd.to_numeric(df[col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
             mask = mod_amt != 0
             calc_amt.loc[mask] = mod_amt[mask]
+
     df['금액'] = calc_amt
 
     if target_month: df['월'] = target_month
     else:
         if '일자' in df.columns:
             date_clean = df['일자'].astype(str).str.replace('-', '').str.replace('.', '').str.strip().str[:8]
-            df['월'] = date_clean.str[4:6].apply(lambda x: f"{int(x)}월" if str(x).isdigit() else "4월")
+            df['월'] = date_clean.str[4:6].apply(lambda x: f"{int(x)}월" if str(x).isdigit() else "5월")
         else: df['월'] = "5월"
 
     if 'MAS여부' in df.columns:
@@ -73,8 +122,9 @@ def unified_data_parser(df_raw, target_month=None):
 
     return df[['업체명', '물품분류명', '금액', '납품요구번호', '월', 'MAS여부']]
 
+# --- 4. 로컬 기초 데이터 초고속 로딩 ---
 @st.cache_data
-def load_all_local_data():
+def load_local_base_data():
     file_month_map = {'data.csv': '1월', 'data02.csv': '2월', 'data03.csv': '3월', 'data04.csv': '4월'}
     dfs = []
     for file, target_month in file_month_map.items():
@@ -88,7 +138,8 @@ def load_all_local_data():
         if df is not None:
             clean_df = unified_data_parser(df, target_month=target_month)
             if not clean_df.empty: dfs.append(clean_df)
-    
+            
+    # 이전에 긁어온 API 캐시가 있다면 함께 로드
     api_cache_file = "api_data_cache.csv"
     if os.path.exists(api_cache_file):
         try:
@@ -96,21 +147,107 @@ def load_all_local_data():
             dfs.append(api_df)
         except: pass
         
-    df_total = pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+    return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+
+# --- 5. 실시간 스마트 싱크 (최근 3일 긁어오기 + 강철 멘탈 부활) ---
+@st.cache_data(ttl=600)
+def sync_recent_data():
+    now = get_now_kst()
+    bgn_date = (now - timedelta(days=5)).strftime("%Y%m%d") # 넉넉하게 최근 4~5일치 검사
+    end_date = (now - timedelta(days=2)).strftime("%Y%m%d")
     
-    if not df_total.empty:
-        df_total = df_total.drop_duplicates(subset=['납품요구번호'], keep='last')
-        pattern = '|'.join(EXCLUDE_ITEMS)
-        df_total = df_total[~df_total['물품분류명'].astype(str).str.contains(pattern, na=False, regex=True)]
+    # 중찬이 인증키
+    RAW_KEY = "d6a789992823ed502e65039680f537b3db0da665bcb00e41330ce78a7c07f466"
+    BASE_URL = "http://apis.data.go.kr/1230000/at/ShoppingMallPrdctInfoService/getDlvrReqInfoList"
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    
+    all_raw = []
+    page = 1
+    
+    while True:
+        url = f"{BASE_URL}?serviceKey={RAW_KEY}&numOfRows=500&pageNo={page}&inqryDiv=1&inqryBgnDate={bgn_date}&inqryEndDate={end_date}"
         
-    return df_total
+        success = False
+        # 💡 [핵심 부활] 에러 나도 조용히 숨지 않고 3번 멱살 잡고 뜯어오는 로직
+        for attempt in range(3):
+            try:
+                res = requests.get(url, headers=headers, timeout=45, verify=False)
+                if res.status_code == 200:
+                    success = True; break
+                elif res.status_code == 429:
+                    if attempt == 2: return pd.DataFrame(), "🚨 조달청 일일 트래픽 한도 초과! (기존 데이터만 표시됨)", "error"
+                    time.sleep(5)
+                else: time.sleep(3)
+            except: time.sleep(3)
+            
+        if not success:
+            return pd.DataFrame(), "🚨 조달청 서버 통신 불안정 (기존 데이터만 표시됨)", "error"
+            
+        try:
+            root = ET.fromstring(res.content)
+            if root.findtext('.//resultCode') not in ['00', '0']: 
+                return pd.DataFrame(), f"🚨 API 거부: {root.findtext('.//resultMsg')}", "error"
+                
+            total = int(root.findtext('.//totalCount') or 0)
+            if total == 0: 
+                return pd.DataFrame(), f"🔵 최근 3일 ({bgn_date}~{end_date}) 전국 조달청 신규 실적 0건", "success"
+                
+            items = root.findall('.//item')
+            if not items: break
+            for item in items:
+                all_raw.append({child.tag: child.text for child in item})
+                
+            if page * 500 >= total: break
+            page += 1
+            time.sleep(2)
+        except Exception as e:
+            return pd.DataFrame(), f"🚨 데이터 파싱 에러: {str(e)}", "error"
 
-df_total = load_all_local_data()
+    if not all_raw:
+        return pd.DataFrame(), f"🔵 최근 3일 ({bgn_date}~{end_date}) 전국 조달청 신규 실적 0건", "success"
+        
+    df_clean = unified_data_parser(pd.DataFrame(all_raw))
+    if df_clean.empty:
+        return pd.DataFrame(), f"🔵 타겟 52개 업체의 최근 3일 신규 실적 없음", "success"
+        
+    return df_clean, f"🟢 실시간 동기화 완료! (타겟 업체 신규 실적 {len(df_clean)}건 추가됨)", "success"
 
-st.markdown(f"<div class='main-title'>🏆 조달청 통합 대시보드 v74.0 (Zero-Wait 초고속 뷰어)</div>", unsafe_allow_html=True)
-st.markdown(f"<div class='update-time'>🕒 시스템 상태: 로컬 DB 로딩 완료 (대기시간 0초)</div>", unsafe_allow_html=True)
+# --- 메인 실행 ---
+st.markdown(f"<div class='main-title'>🏆 조달청 통합 대시보드 v76.0 (투명 동기화판)</div>", unsafe_allow_html=True)
+
+df_base = load_local_base_data()
+
+with st.spinner('📡 조달청 실시간 동기화 중... (최근 3일치 스캔)'):
+    df_recent, sync_msg, sync_type = sync_recent_data()
+
+# 실시간 데이터를 받아왔으면 기존 데이터랑 합치고 로컬 캐시에 영구 저장
+if not df_recent.empty:
+    df_total = pd.concat([df_base, df_recent], ignore_index=True)
+    
+    api_cache_file = "api_data_cache.csv"
+    if os.path.exists(api_cache_file):
+        old_cache = pd.read_csv(api_cache_file, encoding='utf-8-sig')
+        new_cache = pd.concat([old_cache, df_recent]).drop_duplicates(subset=['납품요구번호'], keep='last')
+    else:
+        new_cache = df_recent
+    new_cache.to_csv(api_cache_file, index=False, encoding='utf-8-sig')
+else:
+    df_total = df_base.copy()
+
+# 중복 제거 및 필터링
+if not df_total.empty:
+    df_total = df_total.drop_duplicates(subset=['납품요구번호'], keep='last')
+    pattern = '|'.join(EXCLUDE_ITEMS)
+    df_total = df_total[~df_total['물품분류명'].astype(str).str.contains(pattern, na=False, regex=True)]
+
+# 💡 [핵심] 파이썬이 무슨 일을 했는지 맨 위에 전광판으로 띄워줌!
+st.markdown(f"<div class='status-bar status-{sync_type}'>🕒 상태 보고: {sync_msg}</div>", unsafe_allow_html=True)
 
 with st.sidebar:
+    if st.button("🔄 실시간 데이터 다시 확인 (캐시 삭제)", use_container_width=True):
+        sync_recent_data.clear()
+        st.rerun()
+        
     st.header("🔍 품목 상세 필터")
     if df_total.empty:
         st.error("데이터 없음")
@@ -125,6 +262,7 @@ with st.sidebar:
         st.write("---")
         selected_items = [i for i in all_items if st.checkbox(i, value=st.session_state.get(f"cb_{i}", True), key=f"cb_{i}")]
 
+# --- 8. 메인 화면 ---
 if selected_items and not df_total.empty:
     df_f = df_total[df_total['물품분류명'].isin(selected_items)].copy()
     def get_quarter(m_str):
