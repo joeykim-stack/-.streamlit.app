@@ -141,8 +141,8 @@ def fetch_api_data_raw():
     now = get_now_kst()
     safe_end_date = now - timedelta(days=2) 
     
-    # 🚨🚨🚨 [중요] 여기에 반드시 '원래 쓰던 인증키(c1b379... 풀버전)'를 붙여넣으세요!! 🚨🚨🚨
-    RAW_KEY = "여기에_원래_쓰던_인증키를_전체_붙여넣으세요" 
+    # 🚨 여기에 사용자의 진짜 인증키 적용 완료! 🚨
+    RAW_KEY = "15bc460106a7359afdd54c91410a8dd94c17076ba2aa7d4308cfb8e07e9ce5ae" 
     
     BASE_URL = "http://apis.data.go.kr/1230000/at/ShoppingMallPrdctInfoService/getDlvrReqInfoList"
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36'}
@@ -383,7 +383,8 @@ if selected_items:
         st.dataframe(styled, use_container_width=True, hide_index=True, height=600)
 
         xlsx = BytesIO()
-        with pd.ExcelWriter(xlsx, engine='xlsxwriter') as final.to_excel(wr, index=False, sheet_name='실적랭킹')
+        with pd.ExcelWriter(xlsx, engine='xlsxwriter') as wr:
+            final.to_excel(wr, index=False, sheet_name='실적랭킹')
         st.download_button("💾 엑셀 다운로드", xlsx.getvalue(), f'조달랭킹_{dl_key}_{get_now_kst().strftime("%Y%m%d")}.xlsx', key=dl_key)
 
     st.subheader("⚙️ 랭킹 보드 컨트롤")
