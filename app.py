@@ -60,7 +60,7 @@ def normalize_corp_name(name):
 
 TARGET_MAP = {normalize_corp_name(comp): comp for comp in TARGET_COMPANIES}
 
-# --- 3. 통합 파이프라인 ---
+# --- 3. 통합 파이프라인 (에러 방어 완벽 적용) ---
 def unified_data_parser(df_raw, target_month=None):
     if df_raw is None or df_raw.empty: return pd.DataFrame()
     df = df_raw.copy()
@@ -118,7 +118,8 @@ def unified_data_parser(df_raw, target_month=None):
 
     return df[['업체명', '물품분류명', '금액', '납품요구번호', '월', 'MAS여부']]
 
-# --- 4. 엑셀 로컬 데이터 로드 ---
+# 💡 [핵심] 엑셀은 읽는데 시간이 오래 걸리니까 1시간(3600초) 캐시(기억) 적용! 
+@st.cache_data(ttl=3600)
 def load_historical_data_raw():
     file_month_map = {'data.csv': '1월', 'data02.csv': '2월', 'data03.csv': '3월', 'data04.csv': '4월'}
     dfs = []
@@ -134,13 +135,14 @@ def load_historical_data_raw():
             if not clean_df.empty: dfs.append(clean_df)
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
-# --- 5. 실시간 API 수집 (💡 429 에러 5초 대기 & 일일 한도 체크 완벽 장착!) ---
+# 💡 [핵심] API 통신을 10분(600초) 단위로 캐싱하여 티켓 낭비 완벽 차단!
+@st.cache_data(ttl=600)
 def fetch_api_data_raw():
     now = get_now_kst()
-    safe_end_date = now - timedelta(days=2)
+    safe_end_date = now - timedelta(days=2) 
     
-    # 🚨🚨🚨 [중요] 여기에 반드시 '다른(예전)' 인증키를 넣어주세요!! 🚨🚨🚨
-    RAW_KEY = "15bc460106a7359afdd54c91410a8dd94c17076ba2aa7d4308cfb8e07e9ce5ae" 
+    # 🚨🚨🚨 [중요] 여기에 반드시 '원래 쓰던 인증키(c1b379... 풀버전)'를 붙여넣으세요!! 🚨🚨🚨
+    RAW_KEY = "여기에_원래_쓰던_인증키를_전체_붙여넣으세요" 
     
     BASE_URL = "http://apis.data.go.kr/1230000/at/ShoppingMallPrdctInfoService/getDlvrReqInfoList"
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36'}
@@ -157,27 +159,27 @@ def fetch_api_data_raw():
         page_no = 1
         
         while True:
-            req_url = f"{BASE_URL}?serviceKey={RAW_KEY}&numOfRows=999&pageNo={page_no}&inqryDiv=1&inqryBgnDate={bgn}&inqryEndDate={end}"
+            # numOfRows=500 으로 서버 소화불량 예방
+            req_url = f"{BASE_URL}?serviceKey={RAW_KEY}&numOfRows=500&pageNo={page_no}&inqryDiv=1&inqryBgnDate={bgn}&inqryEndDate={end}"
             
-            # 💡 [핵심] 429 에러 발생 시 똑똑하게 대처하는 무적의 루프
             success = False
-            for attempt in range(3): # 최대 3번 시도
+            for attempt in range(3): 
                 try:
-                    res = requests.get(req_url, headers=headers, timeout=30, verify=False)
+                    res = requests.get(req_url, headers=headers, timeout=45, verify=False)
                     if res.status_code == 200:
                         success = True
-                        break # 성공하면 바로 빠져나감
+                        break 
                     elif res.status_code == 429:
-                        if attempt == 2: # 3번이나 429가 뜨면 진짜 일일 한도 끝난 거임
-                            return pd.DataFrame(), f"🚨 일일 트래픽 한도(429) 초과! (내일 시도하거나 코드의 인증키를 교체하세요)"
-                        time.sleep(5) # 5초 동안 숨 고르고 재시도
+                        if attempt == 2: 
+                            return pd.DataFrame(), f"🚨 일일 트래픽 한도(429) 초과! (내일 시도하거나 인증키를 교체하세요)"
+                        time.sleep(5) 
                     else:
-                        time.sleep(2)
-                except Exception as e:
-                    time.sleep(2)
+                        time.sleep(3) 
+                except Exception:
+                    time.sleep(3)
                     
             if not success:
-                return pd.DataFrame(), f"🚨 통신 불안정 (서버가 응답하지 않습니다. 잠시 후 새로고침 해주세요)"
+                return pd.DataFrame(), f"🚨 통신 불안정 (서버가 응답하지 않습니다. 잠시 후 새로고침 하세요)"
             
             try:
                 root = ET.fromstring(res.content)
@@ -194,11 +196,10 @@ def fetch_api_data_raw():
                     row_dict = {child.tag: child.text for child in item}
                     all_new_data.append(row_dict)
                 
-                if page_no * 999 >= int(total_count_str): break
+                if page_no * 500 >= int(total_count_str): break
                 page_no += 1
                 
-                # 다음 페이지로 넘어갈 때 2초 강제 휴식 (인간 코스프레)
-                time.sleep(2)
+                time.sleep(2) # 429 방어용 2초 휴식
                 
             except Exception as e:
                 return pd.DataFrame(), f"🚨 데이터 파싱 에러: {str(e)}"
@@ -221,7 +222,7 @@ def fetch_api_data_raw():
 def get_processed_data_raw():
     df_hist = load_historical_data_raw()
     
-    with st.spinner('⏳ 사람의 속도로 안전하게 조달청 데이터를 스캔 중입니다... (약 10~30초 소요)'):
+    with st.spinner('⏳ 안전하게 API를 스캔 중입니다... (최초 1회만 약 10~40초 소요)'):
         df_api, api_msg = fetch_api_data_raw()
     
     if not df_api.empty and not df_hist.empty:
@@ -240,11 +241,14 @@ def get_processed_data_raw():
 df_total, api_msg = get_processed_data_raw()
 
 # --- 7. UI ---
-st.markdown(f"<div class='main-title'>🏆 조달청 통합 대시보드 v67.0 (429 완벽 방어판)</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='main-title'>🏆 조달청 통합 대시보드 v72.0 (초고속 캐싱+에러완벽방어)</div>", unsafe_allow_html=True)
 col_head1, col_head2 = st.columns([5, 1])
 with col_head1: st.markdown(f"<div class='update-time'>🕒 상태: {api_msg}</div>", unsafe_allow_html=True)
 with col_head2: 
-    if st.button("🔄 즉시 새로고침", use_container_width=True): st.rerun()
+    if st.button("🔄 즉시 새로고침", use_container_width=True): 
+        # API 캐시를 강제로 비우고 완전히 새로 가져옵니다.
+        fetch_api_data_raw.clear()
+        st.rerun()
 
 with st.sidebar:
     st.header("🔍 품목 상세 필터")
@@ -379,7 +383,7 @@ if selected_items:
         st.dataframe(styled, use_container_width=True, hide_index=True, height=600)
 
         xlsx = BytesIO()
-        with pd.ExcelWriter(xlsx, engine='xlsxwriter') as wr: final.to_excel(wr, index=False, sheet_name='실적랭킹')
+        with pd.ExcelWriter(xlsx, engine='xlsxwriter') as final.to_excel(wr, index=False, sheet_name='실적랭킹')
         st.download_button("💾 엑셀 다운로드", xlsx.getvalue(), f'조달랭킹_{dl_key}_{get_now_kst().strftime("%Y%m%d")}.xlsx', key=dl_key)
 
     st.subheader("⚙️ 랭킹 보드 컨트롤")
