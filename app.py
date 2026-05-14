@@ -60,7 +60,7 @@ def normalize_corp_name(name):
 
 TARGET_MAP = {normalize_corp_name(comp): comp for comp in TARGET_COMPANIES}
 
-# --- 3. 통합 파이프라인 (🔥 MAS 정밀 스캐너 장착) ---
+# --- 3. 통합 파이프라인 (🔥 MAS 정밀 분류 + 강제 적용) ---
 def unified_data_parser(df_raw, target_month=None):
     if df_raw is None or df_raw.empty: return pd.DataFrame()
     df = df_raw.copy()
@@ -109,19 +109,23 @@ def unified_data_parser(df_raw, target_month=None):
             df['월'] = date_clean.str[4:6].apply(lambda x: f"{int(x)}월" if str(x).isdigit() else "4월")
         else: df['월'] = "5월"
 
-    # 💡 [핵심 버그 수정] MAS / 우수조달 정밀 분류 로직
-    df['MAS여부_calc'] = 'N' # 기본값을 일단 N(우수조달/일반 등)으로 세팅하여 과대계상 방지
+    # 💡 [핵심] 기존 캐시/데이터에 휘둘리지 않는 MAS 분류기
+    df['MAS여부_calc'] = 'N' # 우수조달, 총액계약 등은 전부 N으로 세팅 (기본값)
     
-    # 엑셀/API에서 계약 형태를 나타내는 모든 가능한 컬럼명 추적
-    possible_cols = ['계약형태', '계약방법', '계약구분', 'cntrctCnclsStleNm', 'cntrctMthdNm', 'MAS여부']
+    # 만약 원본 엑셀에 사용자가 미리 만들어둔 'MAS여부' 컬럼이 있다면 존중
+    if 'MAS여부' in df.columns:
+        df['MAS여부_calc'] = df['MAS여부'].fillna('N').astype(str).str.strip().str.upper()
+
+    # 모든 계약 관련 컬럼을 샅샅이 뒤져서 덮어쓰기
+    possible_cols = ['계약형태', '계약방법', '계약구분', '계약체결형태명', 'cntrctCnclsStleNm', 'cntrctMthdNm']
     
     for col in possible_cols:
         if col in df.columns:
-            # MAS 관련 키워드가 있으면 Y
+            # 다수공급자, MAS, 제3자단가 키워드가 발견되면 Y로 변경
             mas_mask = df[col].astype(str).str.contains('다수공급자|MAS|mas|제3자', na=False, regex=True)
             df.loc[mas_mask, 'MAS여부_calc'] = 'Y'
             
-            # 우수조달 관련 키워드가 있으면 명시적으로 N 덮어쓰기
+            # 단, '우수'가 포함된 경우 강력하게 N으로 못 박음! (MAS 금액 과대계상 방지)
             non_mas_mask = df[col].astype(str).str.contains('우수', na=False, regex=True)
             df.loc[non_mas_mask, 'MAS여부_calc'] = 'N'
 
@@ -129,7 +133,7 @@ def unified_data_parser(df_raw, target_month=None):
 
     return df[['업체명', '물품분류명', '금액', '납품요구번호', '월', 'MAS여부']]
 
-# 💡 엑셀 데이터는 1시간(3600초) 캐싱
+# 💡 엑셀 데이터 캐싱 (1시간)
 @st.cache_data(ttl=3600)
 def load_historical_data_raw():
     file_month_map = {'data.csv': '1월', 'data02.csv': '2월', 'data03.csv': '3월', 'data04.csv': '4월'}
@@ -146,19 +150,16 @@ def load_historical_data_raw():
             if not clean_df.empty: dfs.append(clean_df)
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
-# 💡 API 통신은 10분(600초) 캐싱 (4월 20일부터 꼼꼼하게 다 긁어옴!)
+# 💡 API 데이터 캐싱 (10분)
 @st.cache_data(ttl=600)
 def fetch_api_data_raw():
     now = get_now_kst()
     safe_end_date = now - timedelta(days=2) 
     
-    # 🚨 중찬이 새 인증키 완벽 장착
     RAW_KEY = "d6a789992823ed502e65039680f537b3db0da665bcb00e41330ce78a7c07f466"
-    
     BASE_URL = "http://apis.data.go.kr/1230000/at/ShoppingMallPrdctInfoService/getDlvrReqInfoList"
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36'}
+    headers = {'User-Agent': 'Mozilla/5.0'}
 
-    # 🌟 4월 20일 복구 스케줄
     date_ranges = [
         ("20260420", "20260430"),
         ("20260501", safe_end_date.strftime("%Y%m%d"))
@@ -178,24 +179,18 @@ def fetch_api_data_raw():
                 try:
                     res = requests.get(req_url, headers=headers, timeout=45, verify=False)
                     if res.status_code == 200:
-                        success = True
-                        break 
+                        success = True; break 
                     elif res.status_code == 429:
-                        if attempt == 2: 
-                            return pd.DataFrame(), f"🚨 일일 트래픽 한도(429) 초과! (내일 시도해주세요)"
+                        if attempt == 2: return pd.DataFrame(), f"🚨 일일 트래픽 한도 초과! (내일 시도해주세요)"
                         time.sleep(5) 
-                    else:
-                        time.sleep(3) 
-                except Exception:
-                    time.sleep(3)
+                    else: time.sleep(3) 
+                except: time.sleep(3)
                     
-            if not success:
-                return pd.DataFrame(), f"🚨 통신 불안정 (서버 응답 없음. 잠시 후 새로고침 하세요)"
+            if not success: return pd.DataFrame(), f"🚨 통신 불안정 (서버 응답 없음. 잠시 후 새로고침 하세요)"
             
             try:
                 root = ET.fromstring(res.content)
-                if root.findtext('.//resultCode') not in ['00', '0']: 
-                    return pd.DataFrame(), f"🚨 API 거부: {root.findtext('.//resultMsg')}"
+                if root.findtext('.//resultCode') not in ['00', '0']: return pd.DataFrame(), f"🚨 API 거부: {root.findtext('.//resultMsg')}"
                 
                 total_count_str = root.findtext('.//totalCount')
                 if not total_count_str or int(total_count_str) == 0: break
@@ -209,31 +204,23 @@ def fetch_api_data_raw():
                 
                 if page_no * 500 >= int(total_count_str): break
                 page_no += 1
-                
-                time.sleep(2) # 429 에러 방어용 2초 휴식
-                
-            except Exception as e:
-                return pd.DataFrame(), f"🚨 데이터 파싱 에러: {str(e)}"
+                time.sleep(2) 
+            except Exception as e: return pd.DataFrame(), f"🚨 데이터 파싱 에러: {str(e)}"
 
-    if not all_new_data:
-        return pd.DataFrame(), f"🔵 최신화 완료 (4/20 이후 신규 실적 없음)"
+    if not all_new_data: return pd.DataFrame(), f"🔵 최신화 완료 (4/20 이후 신규 실적 없음)"
         
     try:
         df_api_raw = pd.DataFrame(all_new_data)
         raw_count = len(df_api_raw)
         df_api_clean = unified_data_parser(df_api_raw)
         
-        if df_api_clean.empty:
-            return pd.DataFrame(), f"🔵 최신화 완료 (조달청 {raw_count}건 중 타겟 업체 실적 없음)"
-        return df_api_clean, f"🟢 실시간 데이터 업데이트 완료! (4/20 이후 신규 실적 {len(df_api_clean)}건 완벽 추출)"
-    except Exception as e:
-        return pd.DataFrame(), f"🚨 통합 파이프라인 에러: {str(e)}"
+        if df_api_clean.empty: return pd.DataFrame(), f"🔵 최신화 완료 (조달청 {raw_count}건 중 타겟 업체 실적 없음)"
+        return df_api_clean, f"🟢 실시간 데이터 업데이트 완료! (4/20 이후 신규 실적 {len(df_api_clean)}건 추출)"
+    except Exception as e: return pd.DataFrame(), f"🚨 통합 파이프라인 에러: {str(e)}"
 
-# --- 6. 통합 및 필터링 ---
 def get_processed_data_raw():
     df_hist = load_historical_data_raw()
-    
-    with st.spinner('⏳ 4월 20일 이후 실시간 데이터를 스캔 중입니다... (최초 1회만 약 30~60초 소요)'):
+    with st.spinner('⏳ 데이터를 새로 불러오고 계산 중입니다... (최초 1회)'):
         df_api, api_msg = fetch_api_data_raw()
     
     if not df_api.empty and not df_hist.empty:
@@ -246,18 +233,18 @@ def get_processed_data_raw():
     if not df_total.empty:
         pattern = '|'.join(EXCLUDE_ITEMS)
         df_total = df_total[~df_total['물품분류명'].astype(str).str.contains(pattern, na=False, regex=True)]
-    
     return df_total, api_msg
 
 df_total, api_msg = get_processed_data_raw()
 
 # --- 7. UI ---
-st.markdown(f"<div class='main-title'>🏆 조달청 통합 대시보드 v78.0 (우수/MAS 정밀 분리판)</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='main-title'>🏆 조달청 통합 대시보드 v79.0 (메모리 완전삭제판)</div>", unsafe_allow_html=True)
 col_head1, col_head2 = st.columns([5, 1])
 with col_head1: st.markdown(f"<div class='update-time'>🕒 상태: {api_msg}</div>", unsafe_allow_html=True)
 with col_head2: 
-    if st.button("🔄 즉시 새로고침", use_container_width=True): 
-        fetch_api_data_raw.clear()
+    # 💡 [핵심] 이제 API 뿐만 아니라 과거 엑셀 데이터 캐시까지 싹 날려버립니다!
+    if st.button("🔄 즉시 새로고침 (메모리 완전 초기화)", use_container_width=True): 
+        st.cache_data.clear() # 모든 기억 상실! 코드가 완벽히 새로 적용됨!
         st.rerun()
 
 with st.sidebar:
