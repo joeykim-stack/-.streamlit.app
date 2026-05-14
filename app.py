@@ -60,7 +60,7 @@ def normalize_corp_name(name):
 
 TARGET_MAP = {normalize_corp_name(comp): comp for comp in TARGET_COMPANIES}
 
-# --- 3. 통합 파이프라인 (🔥 MAS 정밀 분류 + 강제 적용) ---
+# --- 3. 통합 파이프라인 (🔥 MAS vs 우수조달 현미경 분리 로직) ---
 def unified_data_parser(df_raw, target_month=None):
     if df_raw is None or df_raw.empty: return pd.DataFrame()
     df = df_raw.copy()
@@ -109,29 +109,30 @@ def unified_data_parser(df_raw, target_month=None):
             df['월'] = date_clean.str[4:6].apply(lambda x: f"{int(x)}월" if str(x).isdigit() else "4월")
         else: df['월'] = "5월"
 
-    # 💡 [핵심] 기존 캐시/데이터에 휘둘리지 않는 MAS 분류기
-    df['MAS여부_calc'] = 'N' # 우수조달, 총액계약 등은 전부 N으로 세팅 (기본값)
+    # 💡 [핵심] MAS vs 우수조달 완벽 분리 엔진
+    df['MAS여부'] = 'N' 
+    df['계약종류_상세'] = '기타/미상'
     
-    # 만약 원본 엑셀에 사용자가 미리 만들어둔 'MAS여부' 컬럼이 있다면 존중
-    if 'MAS여부' in df.columns:
-        df['MAS여부_calc'] = df['MAS여부'].fillna('N').astype(str).str.strip().str.upper()
-
-    # 모든 계약 관련 컬럼을 샅샅이 뒤져서 덮어쓰기
     possible_cols = ['계약형태', '계약방법', '계약구분', '계약체결형태명', 'cntrctCnclsStleNm', 'cntrctMthdNm']
     
     for col in possible_cols:
         if col in df.columns:
-            # 다수공급자, MAS, 제3자단가 키워드가 발견되면 Y로 변경
-            mas_mask = df[col].astype(str).str.contains('다수공급자|MAS|mas|제3자', na=False, regex=True)
-            df.loc[mas_mask, 'MAS여부_calc'] = 'Y'
+            # 1. 진짜 MAS (다수공급자계약)
+            mas_mask = df[col].astype(str).str.contains('다수공급자|MAS|mas', case=False, na=False, regex=True)
+            df.loc[mas_mask, 'MAS여부'] = 'Y'
+            df.loc[mas_mask, '계약종류_상세'] = 'MAS(다수공급자)'
             
-            # 단, '우수'가 포함된 경우 강력하게 N으로 못 박음! (MAS 금액 과대계상 방지)
-            non_mas_mask = df[col].astype(str).str.contains('우수', na=False, regex=True)
-            df.loc[non_mas_mask, 'MAS여부_calc'] = 'N'
+            # 2. 우수조달 및 제3자단가 (MAS가 아님!)
+            je3_mask = df[col].astype(str).str.contains('제3자|우수', na=False, regex=True) & (~mas_mask)
+            df.loc[je3_mask, 'MAS여부'] = 'N'
+            df.loc[je3_mask, '계약종류_상세'] = '우수조달/제3자단가'
+            
+            # 3. 총액/일반경쟁 등
+            gen_mask = df[col].astype(str).str.contains('총액|일반', na=False, regex=True)
+            df.loc[gen_mask, 'MAS여부'] = 'N'
+            df.loc[gen_mask, '계약종류_상세'] = '총액/일반경쟁'
 
-    df['MAS여부'] = df['MAS여부_calc']
-
-    return df[['업체명', '물품분류명', '금액', '납품요구번호', '월', 'MAS여부']]
+    return df[['업체명', '물품분류명', '금액', '납품요구번호', '월', 'MAS여부', '계약종류_상세']]
 
 # 💡 엑셀 데이터 캐싱 (1시간)
 @st.cache_data(ttl=3600)
@@ -150,7 +151,7 @@ def load_historical_data_raw():
             if not clean_df.empty: dfs.append(clean_df)
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
-# 💡 API 데이터 캐싱 (10분)
+# 💡 API 통신 캐싱 (10분)
 @st.cache_data(ttl=600)
 def fetch_api_data_raw():
     now = get_now_kst()
@@ -158,13 +159,9 @@ def fetch_api_data_raw():
     
     RAW_KEY = "d6a789992823ed502e65039680f537b3db0da665bcb00e41330ce78a7c07f466"
     BASE_URL = "http://apis.data.go.kr/1230000/at/ShoppingMallPrdctInfoService/getDlvrReqInfoList"
-    headers = {'User-Agent': 'Mozilla/5.0'}
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36'}
 
-    date_ranges = [
-        ("20260420", "20260430"),
-        ("20260501", safe_end_date.strftime("%Y%m%d"))
-    ]
-    
+    date_ranges = [("20260420", "20260430"), ("20260501", safe_end_date.strftime("%Y%m%d"))]
     all_new_data = []
 
     for bgn, end in date_ranges:
@@ -186,7 +183,7 @@ def fetch_api_data_raw():
                     else: time.sleep(3) 
                 except: time.sleep(3)
                     
-            if not success: return pd.DataFrame(), f"🚨 통신 불안정 (서버 응답 없음. 잠시 후 새로고침 하세요)"
+            if not success: return pd.DataFrame(), f"🚨 통신 불안정 (잠시 후 새로고침 하세요)"
             
             try:
                 root = ET.fromstring(res.content)
@@ -198,37 +195,32 @@ def fetch_api_data_raw():
                 items = root.findall('.//item')
                 if not items: break
                 
-                for item in items:
-                    row_dict = {child.tag: child.text for child in item}
-                    all_new_data.append(row_dict)
+                for item in items: all_new_data.append({child.tag: child.text for child in item})
                 
                 if page_no * 500 >= int(total_count_str): break
                 page_no += 1
                 time.sleep(2) 
-            except Exception as e: return pd.DataFrame(), f"🚨 데이터 파싱 에러: {str(e)}"
+            except Exception as e: return pd.DataFrame(), f"🚨 파싱 에러: {str(e)}"
 
-    if not all_new_data: return pd.DataFrame(), f"🔵 최신화 완료 (4/20 이후 신규 실적 없음)"
+    if not all_new_data: return pd.DataFrame(), f"🔵 4/20 이후 신규 실적 없음"
         
     try:
         df_api_raw = pd.DataFrame(all_new_data)
-        raw_count = len(df_api_raw)
         df_api_clean = unified_data_parser(df_api_raw)
-        
-        if df_api_clean.empty: return pd.DataFrame(), f"🔵 최신화 완료 (조달청 {raw_count}건 중 타겟 업체 실적 없음)"
-        return df_api_clean, f"🟢 실시간 데이터 업데이트 완료! (4/20 이후 신규 실적 {len(df_api_clean)}건 추출)"
-    except Exception as e: return pd.DataFrame(), f"🚨 통합 파이프라인 에러: {str(e)}"
+        if df_api_clean.empty: return pd.DataFrame(), f"🔵 신규 실적 없음"
+        return df_api_clean, f"🟢 실시간 수집 성공! (신규 {len(df_api_clean)}건 추출)"
+    except Exception as e: return pd.DataFrame(), f"🚨 파이프라인 에러: {str(e)}"
 
 def get_processed_data_raw():
     df_hist = load_historical_data_raw()
-    with st.spinner('⏳ 데이터를 새로 불러오고 계산 중입니다... (최초 1회)'):
+    with st.spinner('⏳ 4월 20일 이후 실시간 데이터를 스캔 중입니다... (약 30~60초)'):
         df_api, api_msg = fetch_api_data_raw()
     
     if not df_api.empty and not df_hist.empty:
         existing = set(df_hist['납품요구번호'].unique())
         df_api_clean = df_api[~df_api['납품요구번호'].isin(existing)]
         df_total = pd.concat([df_hist, df_api_clean], ignore_index=True)
-    else:
-        df_total = df_api if not df_api.empty else df_hist
+    else: df_total = df_api if not df_api.empty else df_hist
 
     if not df_total.empty:
         pattern = '|'.join(EXCLUDE_ITEMS)
@@ -238,13 +230,12 @@ def get_processed_data_raw():
 df_total, api_msg = get_processed_data_raw()
 
 # --- 7. UI ---
-st.markdown(f"<div class='main-title'>🏆 조달청 통합 대시보드 v79.0 (메모리 완전삭제판)</div>", unsafe_allow_html=True)
-col_head1, col_head2 = st.columns([5, 1])
+st.markdown(f"<div class='main-title'>🏆 조달청 통합 대시보드 v80.0 (MAS 정밀 분리판)</div>", unsafe_allow_html=True)
+col_head1, col_head2 = st.columns([5, 2])
 with col_head1: st.markdown(f"<div class='update-time'>🕒 상태: {api_msg}</div>", unsafe_allow_html=True)
 with col_head2: 
-    # 💡 [핵심] 이제 API 뿐만 아니라 과거 엑셀 데이터 캐시까지 싹 날려버립니다!
     if st.button("🔄 즉시 새로고침 (메모리 완전 초기화)", use_container_width=True): 
-        st.cache_data.clear() # 모든 기억 상실! 코드가 완벽히 새로 적용됨!
+        st.cache_data.clear() # 지독한 메모리를 완벽 삭제!
         st.rerun()
 
 with st.sidebar:
@@ -270,10 +261,20 @@ if selected_items:
         return '1분기' if m<=3 else ('2분기' if m<=6 else ('3분기' if m<=9 else '4분기'))
     df_f['분기'] = df_f['월'].apply(get_quarter)
     
+    # 🌟 [세오 데이터 검증 전광판 추가]
+    with st.expander("🛠️ [데이터 검증] (주)세오 19억의 진실 (계약 종류별 해부)", expanded=True):
+        seo_df = df_f[df_f['업체명'] == '주식회사 세오']
+        if not seo_df.empty:
+            st.markdown("조달청 원본 데이터에서 세오의 실적을 **계약 종류별**로 쪼개본 결과입니다.")
+            seo_sum = seo_df.groupby('계약종류_상세')['금액'].sum().reset_index()
+            st.dataframe(seo_sum.style.format({'금액': '{:,.0f} 원'}), hide_index=True)
+        else:
+            st.info("세오의 실적 데이터가 없습니다.")
+            
     t_cnt = df_f['납품요구번호'].nunique()
     t_amt = df_f['금액'].sum()
     c1, c2, c3 = st.columns(3)
-    c1.metric("💰 누적 매출액", f"{t_amt:,.0f} 원")
+    c1.metric("💰 누적 매출액 (전체)", f"{t_amt:,.0f} 원")
     c2.metric("📝 총 계약 건수", f"{t_cnt:,} 건")
     c3.metric("📊 건당 평균 실적", f"{(t_amt/t_cnt if t_cnt>0 else 0):,.0f} 원")
     st.markdown("---")
@@ -396,6 +397,6 @@ if selected_items:
 
     st.markdown("<br><br>", unsafe_allow_html=True)
     board_df_mas = df_f[df_f['MAS여부'] == 'Y'].copy()
-    render_ranking_board(board_df_mas, "🏢 MAS 계약 전용 실적 랭킹", show_cnt, 'sort_mas', 'dl_mas', 'Greens')
+    render_ranking_board(board_df_mas, "🏢 순수 MAS(다수공급자) 전용 실적 랭킹", show_cnt, 'sort_mas', 'dl_mas', 'Greens')
 
 st.markdown("<br><center style='color:gray;'>Copyright(C) 2026 Joey Kim. Data from Public Data Portal.</center>", unsafe_allow_html=True)
