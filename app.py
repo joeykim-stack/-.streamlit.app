@@ -60,7 +60,7 @@ def normalize_corp_name(name):
 
 TARGET_MAP = {normalize_corp_name(comp): comp for comp in TARGET_COMPANIES}
 
-# --- 3. 통합 파이프라인 (🔥 MAS vs 우수조달 현미경 분리 로직) ---
+# --- 3. 통합 파이프라인 (🔥 오류 수정된 퍼펙트 밸런스 로직) ---
 def unified_data_parser(df_raw, target_month=None):
     if df_raw is None or df_raw.empty: return pd.DataFrame()
     df = df_raw.copy()
@@ -109,7 +109,7 @@ def unified_data_parser(df_raw, target_month=None):
             df['월'] = date_clean.str[4:6].apply(lambda x: f"{int(x)}월" if str(x).isdigit() else "4월")
         else: df['월'] = "5월"
 
-    # 💡 [핵심] MAS vs 우수조달 완벽 분리 엔진
+    # 💡 [핵심] API 실시간 데이터를 살리는 MAS 분리 엔진
     df['MAS여부'] = 'N' 
     df['계약종류_상세'] = '기타/미상'
     
@@ -117,15 +117,15 @@ def unified_data_parser(df_raw, target_month=None):
     
     for col in possible_cols:
         if col in df.columns:
-            # 1. 진짜 MAS (다수공급자계약)
-            mas_mask = df[col].astype(str).str.contains('다수공급자|MAS|mas', case=False, na=False, regex=True)
+            # 1. 1차 포용: '제3자단가', '다수공급자', 'MAS'는 무조건 일단 MAS(Y)로 받아들임! (API 실시간 데이터 복구!)
+            mas_mask = df[col].astype(str).str.contains('다수공급자|MAS|mas|제3자', case=False, na=False, regex=True)
             df.loc[mas_mask, 'MAS여부'] = 'Y'
-            df.loc[mas_mask, '계약종류_상세'] = 'MAS(다수공급자)'
+            df.loc[mas_mask, '계약종류_상세'] = 'MAS 및 제3자단가'
             
-            # 2. 우수조달 및 제3자단가 (MAS가 아님!)
-            je3_mask = df[col].astype(str).str.contains('제3자|우수', na=False, regex=True) & (~mas_mask)
-            df.loc[je3_mask, 'MAS여부'] = 'N'
-            df.loc[je3_mask, '계약종류_상세'] = '우수조달/제3자단가'
+            # 2. 2차 철퇴 (우선순위 덮어쓰기): 단, 그 문장 안에 '우수'나 '혁신'이 있으면 MAS 방에서 쫓아냄! (세오 19억 해결!)
+            usu_mask = df[col].astype(str).str.contains('우수|혁신', na=False, regex=True)
+            df.loc[usu_mask, 'MAS여부'] = 'N'
+            df.loc[usu_mask, '계약종류_상세'] = '우수조달/혁신'
             
             # 3. 총액/일반경쟁 등
             gen_mask = df[col].astype(str).str.contains('총액|일반', na=False, regex=True)
@@ -159,7 +159,7 @@ def fetch_api_data_raw():
     
     RAW_KEY = "d6a789992823ed502e65039680f537b3db0da665bcb00e41330ce78a7c07f466"
     BASE_URL = "http://apis.data.go.kr/1230000/at/ShoppingMallPrdctInfoService/getDlvrReqInfoList"
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36'}
+    headers = {'User-Agent': 'Mozilla/5.0'}
 
     date_ranges = [("20260420", "20260430"), ("20260501", safe_end_date.strftime("%Y%m%d"))]
     all_new_data = []
@@ -206,9 +206,10 @@ def fetch_api_data_raw():
         
     try:
         df_api_raw = pd.DataFrame(all_new_data)
+        raw_count = len(df_api_raw)
         df_api_clean = unified_data_parser(df_api_raw)
         if df_api_clean.empty: return pd.DataFrame(), f"🔵 신규 실적 없음"
-        return df_api_clean, f"🟢 실시간 수집 성공! (신규 {len(df_api_clean)}건 추출)"
+        return df_api_clean, f"🟢 실시간 데이터 수집 완료! (4/20 이후 신규 {len(df_api_clean)}건 완벽 추출)"
     except Exception as e: return pd.DataFrame(), f"🚨 파이프라인 에러: {str(e)}"
 
 def get_processed_data_raw():
@@ -230,12 +231,12 @@ def get_processed_data_raw():
 df_total, api_msg = get_processed_data_raw()
 
 # --- 7. UI ---
-st.markdown(f"<div class='main-title'>🏆 조달청 통합 대시보드 v80.0 (MAS 정밀 분리판)</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='main-title'>🏆 조달청 통합 대시보드 v81.0 (퍼펙트 밸런스판)</div>", unsafe_allow_html=True)
 col_head1, col_head2 = st.columns([5, 2])
 with col_head1: st.markdown(f"<div class='update-time'>🕒 상태: {api_msg}</div>", unsafe_allow_html=True)
 with col_head2: 
     if st.button("🔄 즉시 새로고침 (메모리 완전 초기화)", use_container_width=True): 
-        st.cache_data.clear() # 지독한 메모리를 완벽 삭제!
+        st.cache_data.clear() 
         st.rerun()
 
 with st.sidebar:
@@ -261,7 +262,6 @@ if selected_items:
         return '1분기' if m<=3 else ('2분기' if m<=6 else ('3분기' if m<=9 else '4분기'))
     df_f['분기'] = df_f['월'].apply(get_quarter)
     
-    # 🌟 [세오 데이터 검증 전광판 추가]
     with st.expander("🛠️ [데이터 검증] (주)세오 19억의 진실 (계약 종류별 해부)", expanded=True):
         seo_df = df_f[df_f['업체명'] == '주식회사 세오']
         if not seo_df.empty:
