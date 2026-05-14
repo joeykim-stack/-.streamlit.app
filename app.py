@@ -60,7 +60,7 @@ def normalize_corp_name(name):
 
 TARGET_MAP = {normalize_corp_name(comp): comp for comp in TARGET_COMPANIES}
 
-# --- 3. 통합 파이프라인 ---
+# --- 3. 통합 파이프라인 (🔥 MAS 정밀 스캐너 장착) ---
 def unified_data_parser(df_raw, target_month=None):
     if df_raw is None or df_raw.empty: return pd.DataFrame()
     df = df_raw.copy()
@@ -109,12 +109,23 @@ def unified_data_parser(df_raw, target_month=None):
             df['월'] = date_clean.str[4:6].apply(lambda x: f"{int(x)}월" if str(x).isdigit() else "4월")
         else: df['월'] = "5월"
 
-    if 'MAS여부' in df.columns:
-        df['MAS여부'] = df['MAS여부'].fillna('N').astype(str).str.strip().str.upper()
-    else:
-        cntrct_col = 'cntrctCnclsStleNm' if 'cntrctCnclsStleNm' in df.columns else ('계약형태' if '계약형태' in df.columns else None)
-        if cntrct_col: df['MAS여부'] = df[cntrct_col].astype(str).apply(lambda x: 'Y' if any(k in x for k in ['다수공급자', 'MAS', 'mas', '제3자']) else 'N')
-        else: df['MAS여부'] = 'Y'
+    # 💡 [핵심 버그 수정] MAS / 우수조달 정밀 분류 로직
+    df['MAS여부_calc'] = 'N' # 기본값을 일단 N(우수조달/일반 등)으로 세팅하여 과대계상 방지
+    
+    # 엑셀/API에서 계약 형태를 나타내는 모든 가능한 컬럼명 추적
+    possible_cols = ['계약형태', '계약방법', '계약구분', 'cntrctCnclsStleNm', 'cntrctMthdNm', 'MAS여부']
+    
+    for col in possible_cols:
+        if col in df.columns:
+            # MAS 관련 키워드가 있으면 Y
+            mas_mask = df[col].astype(str).str.contains('다수공급자|MAS|mas|제3자', na=False, regex=True)
+            df.loc[mas_mask, 'MAS여부_calc'] = 'Y'
+            
+            # 우수조달 관련 키워드가 있으면 명시적으로 N 덮어쓰기
+            non_mas_mask = df[col].astype(str).str.contains('우수', na=False, regex=True)
+            df.loc[non_mas_mask, 'MAS여부_calc'] = 'N'
+
+    df['MAS여부'] = df['MAS여부_calc']
 
     return df[['업체명', '물품분류명', '금액', '납품요구번호', '월', 'MAS여부']]
 
@@ -147,7 +158,7 @@ def fetch_api_data_raw():
     BASE_URL = "http://apis.data.go.kr/1230000/at/ShoppingMallPrdctInfoService/getDlvrReqInfoList"
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36'}
 
-    # 🌟 드디어 복구된 '4월 20일' 시작 스케줄!
+    # 🌟 4월 20일 복구 스케줄
     date_ranges = [
         ("20260420", "20260430"),
         ("20260501", safe_end_date.strftime("%Y%m%d"))
@@ -241,12 +252,11 @@ def get_processed_data_raw():
 df_total, api_msg = get_processed_data_raw()
 
 # --- 7. UI ---
-st.markdown(f"<div class='main-title'>🏆 조달청 통합 대시보드 v77.0 (4월 20일 완벽 복구판)</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='main-title'>🏆 조달청 통합 대시보드 v78.0 (우수/MAS 정밀 분리판)</div>", unsafe_allow_html=True)
 col_head1, col_head2 = st.columns([5, 1])
 with col_head1: st.markdown(f"<div class='update-time'>🕒 상태: {api_msg}</div>", unsafe_allow_html=True)
 with col_head2: 
     if st.button("🔄 즉시 새로고침", use_container_width=True): 
-        # 이 버튼을 누르면 10분 캐시를 날리고 조달청 서버에 다시 접속합니다.
         fetch_api_data_raw.clear()
         st.rerun()
 
