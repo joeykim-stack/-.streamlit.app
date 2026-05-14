@@ -8,6 +8,7 @@ import plotly.graph_objects as go
 from io import BytesIO
 import time
 import urllib3
+import os
 
 # SSL 경고 숨기기
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -60,7 +61,7 @@ def normalize_corp_name(name):
 
 TARGET_MAP = {normalize_corp_name(comp): comp for comp in TARGET_COMPANIES}
 
-# --- 3. 통합 파이프라인 (🔥 오류 수정된 퍼펙트 밸런스 로직) ---
+# --- 3. 통합 파이프라인 (🔥 MAS 증발 방지 보호막 추가) ---
 def unified_data_parser(df_raw, target_month=None):
     if df_raw is None or df_raw.empty: return pd.DataFrame()
     df = df_raw.copy()
@@ -109,36 +110,34 @@ def unified_data_parser(df_raw, target_month=None):
             df['월'] = date_clean.str[4:6].apply(lambda x: f"{int(x)}월" if str(x).isdigit() else "4월")
         else: df['월'] = "5월"
 
-    # 💡 [핵심] API 실시간 데이터를 살리는 MAS 분리 엔진
-    df['MAS여부'] = 'N' 
-    df['계약종류_상세'] = '기타/미상'
+    # 💡 [핵심 버그 수정] 이미 MAS분류가 끝난 데이터(캐시)는 건드리지 않고 락(Lock)을 건다!
+    if 'MAS여부' not in df.columns:
+        df['MAS여부'] = 'Y' # API 데이터의 기본값은 Y(MAS)로 둔다.
+    if '계약종류_상세' not in df.columns:
+        df['계약종류_상세'] = '기본(MAS추정)'
     
     possible_cols = ['계약형태', '계약방법', '계약구분', '계약체결형태명', 'cntrctCnclsStleNm', 'cntrctMthdNm']
     
     for col in possible_cols:
         if col in df.columns:
-            # 1. 1차 포용: '제3자단가', '다수공급자', 'MAS'는 무조건 일단 MAS(Y)로 받아들임! (API 실시간 데이터 복구!)
+            # 1. 긍정 조건 (제3자단가, MAS)
             mas_mask = df[col].astype(str).str.contains('다수공급자|MAS|mas|제3자', case=False, na=False, regex=True)
             df.loc[mas_mask, 'MAS여부'] = 'Y'
             df.loc[mas_mask, '계약종류_상세'] = 'MAS 및 제3자단가'
             
-            # 2. 2차 철퇴 (우선순위 덮어쓰기): 단, 그 문장 안에 '우수'나 '혁신'이 있으면 MAS 방에서 쫓아냄! (세오 19억 해결!)
-            usu_mask = df[col].astype(str).str.contains('우수|혁신', na=False, regex=True)
+            # 2. 부정 조건 (우수조달, 혁신, 총액) -> 세오 19억 과대계상 방어!
+            usu_mask = df[col].astype(str).str.contains('우수|혁신|총액|일반', na=False, regex=True)
             df.loc[usu_mask, 'MAS여부'] = 'N'
-            df.loc[usu_mask, '계약종류_상세'] = '우수조달/혁신'
-            
-            # 3. 총액/일반경쟁 등
-            gen_mask = df[col].astype(str).str.contains('총액|일반', na=False, regex=True)
-            df.loc[gen_mask, 'MAS여부'] = 'N'
-            df.loc[gen_mask, '계약종류_상세'] = '총액/일반경쟁'
+            df.loc[usu_mask, '계약종류_상세'] = '우수조달/일반경쟁'
 
     return df[['업체명', '물품분류명', '금액', '납품요구번호', '월', 'MAS여부', '계약종류_상세']]
 
-# 💡 엑셀 데이터 캐싱 (1시간)
+# 💡 엑셀 및 캐시 데이터 로드 (1시간)
 @st.cache_data(ttl=3600)
 def load_historical_data_raw():
-    file_month_map = {'data.csv': '1월', 'data02.csv': '2월', 'data03.csv': '3월', 'data04.csv': '4월'}
     dfs = []
+    # 1. 원본 엑셀(1~4월) 로딩
+    file_month_map = {'data.csv': '1월', 'data02.csv': '2월', 'data03.csv': '3월', 'data04.csv': '4월'}
     for file, target_month in file_month_map.items():
         df = None
         for config in [{'encoding':'utf-16','sep':'\t'}, {'encoding':'cp949','sep':','}, {'encoding':'utf-8','sep':','}, {'encoding':'utf-8-sig','sep':','}]:
@@ -149,17 +148,27 @@ def load_historical_data_raw():
         if df is not None:
             clean_df = unified_data_parser(df, target_month=target_month)
             if not clean_df.empty: dfs.append(clean_df)
+            
+    # 💡 [치명적 버그 수정] 실시간 가상 DB(캐시) 로딩 부활!
+    api_cache_file = "api_data_cache.csv"
+    if os.path.exists(api_cache_file):
+        try:
+            api_df = pd.read_csv(api_cache_file, encoding='utf-8-sig')
+            if not api_df.empty:
+                dfs.append(api_df) # 파싱이 끝난 실시간 데이터를 찰진 상태로 붙임
+        except: pass
+        
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
-# 💡 API 통신 캐싱 (10분)
+# 💡 API 실시간 통신 (10분 캐시)
 @st.cache_data(ttl=600)
 def fetch_api_data_raw():
     now = get_now_kst()
-    safe_end_date = now - timedelta(days=2) 
+    safe_end_date = now - timedelta(days=1) # 🌟 어제까지 데이터를 안전하게!
     
     RAW_KEY = "d6a789992823ed502e65039680f537b3db0da665bcb00e41330ce78a7c07f466"
     BASE_URL = "http://apis.data.go.kr/1230000/at/ShoppingMallPrdctInfoService/getDlvrReqInfoList"
-    headers = {'User-Agent': 'Mozilla/5.0'}
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36'}
 
     date_ranges = [("20260420", "20260430"), ("20260501", safe_end_date.strftime("%Y%m%d"))]
     all_new_data = []
@@ -178,12 +187,12 @@ def fetch_api_data_raw():
                     if res.status_code == 200:
                         success = True; break 
                     elif res.status_code == 429:
-                        if attempt == 2: return pd.DataFrame(), f"🚨 일일 트래픽 한도 초과! (내일 시도해주세요)"
+                        if attempt == 2: return pd.DataFrame(), f"🚨 조달청 통신 한도 초과! (기존 캐시 데이터만 표시합니다)"
                         time.sleep(5) 
                     else: time.sleep(3) 
                 except: time.sleep(3)
                     
-            if not success: return pd.DataFrame(), f"🚨 통신 불안정 (잠시 후 새로고침 하세요)"
+            if not success: return pd.DataFrame(), f"🚨 통신 불안정 (잠시 후 다시 시도해주세요)"
             
             try:
                 root = ET.fromstring(res.content)
@@ -206,15 +215,25 @@ def fetch_api_data_raw():
         
     try:
         df_api_raw = pd.DataFrame(all_new_data)
-        raw_count = len(df_api_raw)
         df_api_clean = unified_data_parser(df_api_raw)
+        
         if df_api_clean.empty: return pd.DataFrame(), f"🔵 신규 실적 없음"
-        return df_api_clean, f"🟢 실시간 데이터 수집 완료! (4/20 이후 신규 {len(df_api_clean)}건 완벽 추출)"
+        
+        # 💡 [핵심] API 호출 성공 시 가상 DB(캐시)에 무조건 저장! (429 에러 완벽 방어)
+        cache_file = "api_data_cache.csv"
+        if os.path.exists(cache_file):
+            old_cache = pd.read_csv(cache_file, encoding='utf-8-sig')
+            combined_cache = pd.concat([old_cache, df_api_clean]).drop_duplicates(subset=['납품요구번호'], keep='last')
+            combined_cache.to_csv(cache_file, index=False, encoding='utf-8-sig')
+        else:
+            df_api_clean.to_csv(cache_file, index=False, encoding='utf-8-sig')
+            
+        return df_api_clean, f"🟢 실시간 데이터 수집 완료! (4/20 이후 신규 실적 추출)"
     except Exception as e: return pd.DataFrame(), f"🚨 파이프라인 에러: {str(e)}"
 
 def get_processed_data_raw():
     df_hist = load_historical_data_raw()
-    with st.spinner('⏳ 4월 20일 이후 실시간 데이터를 스캔 중입니다... (약 30~60초)'):
+    with st.spinner('⏳ 4월 20일 이후 실시간 데이터를 스캔 중입니다... (약 30초)'):
         df_api, api_msg = fetch_api_data_raw()
     
     if not df_api.empty and not df_hist.empty:
@@ -224,6 +243,7 @@ def get_processed_data_raw():
     else: df_total = df_api if not df_api.empty else df_hist
 
     if not df_total.empty:
+        df_total = df_total.drop_duplicates(subset=['납품요구번호'], keep='last')
         pattern = '|'.join(EXCLUDE_ITEMS)
         df_total = df_total[~df_total['물품분류명'].astype(str).str.contains(pattern, na=False, regex=True)]
     return df_total, api_msg
@@ -231,7 +251,7 @@ def get_processed_data_raw():
 df_total, api_msg = get_processed_data_raw()
 
 # --- 7. UI ---
-st.markdown(f"<div class='main-title'>🏆 조달청 통합 대시보드 v81.0 (퍼펙트 밸런스판)</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='main-title'>🏆 조달청 통합 대시보드 v82.0 (실시간 + MAS 완벽 복구판)</div>", unsafe_allow_html=True)
 col_head1, col_head2 = st.columns([5, 2])
 with col_head1: st.markdown(f"<div class='update-time'>🕒 상태: {api_msg}</div>", unsafe_allow_html=True)
 with col_head2: 
@@ -255,7 +275,7 @@ with st.sidebar:
         selected_items = [i for i in all_items if st.checkbox(i, value=st.session_state.get(f"cb_{i}", True), key=f"cb_{i}")]
 
 # --- 8. 메인 화면 ---
-if selected_items:
+if selected_items and not df_total.empty:
     df_f = df_total[df_total['물품분류명'].isin(selected_items)].copy()
     def get_quarter(m_str):
         m = int(m_str.replace('월',''))
@@ -265,7 +285,7 @@ if selected_items:
     with st.expander("🛠️ [데이터 검증] (주)세오 19억의 진실 (계약 종류별 해부)", expanded=True):
         seo_df = df_f[df_f['업체명'] == '주식회사 세오']
         if not seo_df.empty:
-            st.markdown("조달청 원본 데이터에서 세오의 실적을 **계약 종류별**로 쪼개본 결과입니다.")
+            st.markdown("조달청 원본 데이터에서 세오의 실적을 **계약 종류별**로 쪼개본 결과입니다. (MAS 6.4억 확인용)")
             seo_sum = seo_df.groupby('계약종류_상세')['금액'].sum().reset_index()
             st.dataframe(seo_sum.style.format({'금액': '{:,.0f} 원'}), hide_index=True)
         else:
@@ -397,6 +417,6 @@ if selected_items:
 
     st.markdown("<br><br>", unsafe_allow_html=True)
     board_df_mas = df_f[df_f['MAS여부'] == 'Y'].copy()
-    render_ranking_board(board_df_mas, "🏢 순수 MAS(다수공급자) 전용 실적 랭킹", show_cnt, 'sort_mas', 'dl_mas', 'Greens')
+    render_ranking_board(board_df_mas, "🏢 순수 MAS(다수공급자/제3자단가) 전용 실적 랭킹", show_cnt, 'sort_mas', 'dl_mas', 'Greens')
 
 st.markdown("<br><center style='color:gray;'>Copyright(C) 2026 Joey Kim. Data from Public Data Portal.</center>", unsafe_allow_html=True)
