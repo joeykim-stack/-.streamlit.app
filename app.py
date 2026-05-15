@@ -61,7 +61,7 @@ def normalize_corp_name(name):
 
 TARGET_MAP = {normalize_corp_name(comp): comp for comp in TARGET_COMPANIES}
 
-# --- 3. 통합 파이프라인 (🔥 1,2,3월 살리기 + 세오 6.4억 방어 로직) ---
+# --- 3. 통합 파이프라인 (🔥 전 컬럼 쌍끌이 스캐너 적용) ---
 def unified_data_parser(df_raw, target_month=None):
     if df_raw is None or df_raw.empty: return pd.DataFrame()
     df = df_raw.copy()
@@ -110,23 +110,38 @@ def unified_data_parser(df_raw, target_month=None):
             df['월'] = date_clean.str[4:6].apply(lambda x: f"{int(x)}월" if str(x).isdigit() else "4월")
         else: df['월'] = "5월"
 
-    # 💡 [핵심 복구] 1~3월 엑셀의 빈칸을 고려해 일단 전부 MAS(Y)로 간주!
-    df['MAS여부'] = 'Y' 
-    df['계약종류_상세'] = 'MAS/제3자단가(기본)'
-    
-    possible_cols = [c for c in ['계약형태', '계약방법', '계약구분', '계약체결형태명', 'cntrctCnclsStleNm', 'cntrctMthdNm'] if c in df.columns]
-    
-    if possible_cols:
-        combined_text = df[possible_cols].apply(lambda row: ' '.join(row.values.astype(str)), axis=1)
+    # 💡 [핵심] 전 컬럼 쌍끌이 MAS 판별기
+    df['MAS여부_최종'] = 'N' 
+    df['계약종류_상세'] = '우수조달/일반경쟁'
+
+    # 기존 엑셀에 사용자가 미리 만들어둔 'MAS여부'가 있으면 존중
+    if 'MAS여부' in df.columns:
+        user_mas = df['MAS여부'].astype(str).str.strip().str.upper()
+        df.loc[user_mas == 'Y', 'MAS여부_최종'] = 'Y'
+        df.loc[user_mas == 'Y', '계약종류_상세'] = 'MAS (수동입력)'
+
+    # 엑셀의 '모든 문자열 컬럼'을 싹 다 합쳐서 키워드 수색!
+    str_cols = df.select_dtypes(include=['object', 'string']).columns
+    if len(str_cols) > 0:
+        all_text = df[str_cols].apply(lambda row: ' '.join(row.fillna('').astype(str)), axis=1)
         
-        # 💡 [세오 19억 방어] 단, '우수', '혁신', '총액', '일반' 이라는 단어가 있으면 뒤도 안 돌아보고 MAS에서 쫓아냄!
-        usu_mask = combined_text.str.contains('우수|혁신|총액|일반', regex=True, na=False)
-        df.loc[usu_mask, 'MAS여부'] = 'N'
-        df.loc[usu_mask, '계약종류_상세'] = '우수조달/일반경쟁'
+        # 1. 다수공급자, MAS 글자가 있으면 무조건 Y
+        pure_mas = all_text.str.contains('다수공급자|MAS|mas', case=False, regex=True)
+        
+        # 2. 제3자단가인데 우수/혁신/총액/일반 글자가 '없는' 경우만 Y (세오 19억 완벽 방어)
+        je3 = all_text.str.contains('제3자', regex=True)
+        usu = all_text.str.contains('우수|혁신|총액|일반', regex=True)
+        je3_mas = je3 & ~usu
+
+        # 최종 합격자들만 MAS로 등업!
+        df.loc[pure_mas | je3_mas, 'MAS여부_최종'] = 'Y'
+        df.loc[pure_mas | je3_mas, '계약종류_상세'] = 'MAS (다수공급자/제3자단가)'
+
+    df['MAS여부'] = df['MAS여부_최종']
 
     return df[['업체명', '물품분류명', '금액', '납품요구번호', '월', 'MAS여부', '계약종류_상세']]
 
-# 💡 엑셀 데이터 캐싱 (1시간)
+# 💡 엑셀 및 캐시 데이터 로드 (1시간)
 @st.cache_data(ttl=3600)
 def load_historical_data_raw():
     dfs = []
@@ -141,10 +156,18 @@ def load_historical_data_raw():
         if df is not None:
             clean_df = unified_data_parser(df, target_month=target_month)
             if not clean_df.empty: dfs.append(clean_df)
-    # 이중장부 원인인 api_data_cache.csv 로딩 완전히 폐기!
+            
+    # API 가상 DB 로딩
+    api_cache_file = "api_data_cache.csv"
+    if os.path.exists(api_cache_file):
+        try:
+            api_df = pd.read_csv(api_cache_file, encoding='utf-8-sig')
+            if not api_df.empty: dfs.append(api_df)
+        except: pass
+        
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
-# 💡 API 데이터 캐싱 (10분) - 오직 4/20 이후만 딱 한 번 가져옴!
+# 💡 API 데이터 캐싱 (10분)
 @st.cache_data(ttl=600)
 def fetch_api_data_raw():
     now = get_now_kst()
@@ -171,12 +194,12 @@ def fetch_api_data_raw():
                     if res.status_code == 200:
                         success = True; break 
                     elif res.status_code == 429:
-                        if attempt == 2: return pd.DataFrame(), f"🚨 일일 트래픽 한도 초과! (내일 조회해주세요)"
+                        if attempt == 2: return pd.DataFrame(), f"🚨 일일 트래픽 한도 초과! (기존 데이터만 표시됨)"
                         time.sleep(5) 
                     else: time.sleep(3) 
                 except: time.sleep(3)
                     
-            if not success: return pd.DataFrame(), f"🚨 조달청 통신 불안정 (잠시 후 새로고침 요망)"
+            if not success: return pd.DataFrame(), f"🚨 통신 불안정 (잠시 후 새로고침 하세요)"
             
             try:
                 root = ET.fromstring(res.content)
@@ -202,13 +225,21 @@ def fetch_api_data_raw():
         df_api_clean = unified_data_parser(df_api_raw)
         if df_api_clean.empty: return pd.DataFrame(), f"🔵 타겟 업체 신규 실적 없음"
         
-        # 뻥튀기의 주범이었던 csv 저장(이중장부) 코드 완전 폐기!
-        return df_api_clean, f"🟢 실시간 데이터 수집 완료! (정상 합산 중)"
+        cache_file = "api_data_cache.csv"
+        if os.path.exists(cache_file):
+            old_cache = pd.read_csv(cache_file, encoding='utf-8-sig')
+            # 중복 제거 완벽 복원 (품목이 다르면 안 지움)
+            combined_cache = pd.concat([old_cache, df_api_clean]).drop_duplicates(subset=['납품요구번호', '물품분류명', '금액'], keep='last')
+            combined_cache.to_csv(cache_file, index=False, encoding='utf-8-sig')
+        else:
+            df_api_clean.to_csv(cache_file, index=False, encoding='utf-8-sig')
+            
+        return df_api_clean, f"🟢 실시간 데이터 수집 완료! (신규 실적 추출)"
     except Exception as e: return pd.DataFrame(), f"🚨 파이프라인 에러: {str(e)}"
 
 def get_processed_data_raw():
     df_hist = load_historical_data_raw()
-    with st.spinner('⏳ 4월 20일 이후 실시간 데이터를 통합 중입니다...'):
+    with st.spinner('⏳ 실시간 데이터를 확인 중입니다... (약 30초 소요)'):
         df_api, api_msg = fetch_api_data_raw()
     
     if not df_api.empty and not df_hist.empty:
@@ -216,9 +247,7 @@ def get_processed_data_raw():
     else: df_total = df_api if not df_api.empty else df_hist
 
     if not df_total.empty:
-        # 중복 제거 최소화 (아예 똑같은 완전 중복행만 제거하여 카메라 2대 계약 날아가는 문제 방지)
-        df_total = df_total.drop_duplicates(ignore_index=True)
-        
+        df_total = df_total.drop_duplicates(subset=['납품요구번호', '물품분류명', '금액'], keep='last')
         pattern = '|'.join(EXCLUDE_ITEMS)
         df_total = df_total[~df_total['물품분류명'].astype(str).str.contains(pattern, na=False, regex=True)]
     return df_total, api_msg
@@ -226,7 +255,7 @@ def get_processed_data_raw():
 df_total, api_msg = get_processed_data_raw()
 
 # --- 7. UI ---
-st.markdown(f"<div class='main-title'>🏆 조달청 통합 대시보드 v85.0 (절대 진리판)</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='main-title'>🏆 조달청 통합 대시보드 v86.0 (찐막 오차 제로판)</div>", unsafe_allow_html=True)
 col_head1, col_head2 = st.columns([5, 2])
 with col_head1: st.markdown(f"<div class='update-time'>🕒 상태: {api_msg}</div>", unsafe_allow_html=True)
 with col_head2: 
@@ -260,7 +289,7 @@ if selected_items and not df_total.empty:
     with st.expander("🛠️ [데이터 검증] (주)세오 19억의 진실 (계약 종류별 해부)", expanded=True):
         seo_df = df_f[df_f['업체명'] == '주식회사 세오']
         if not seo_df.empty:
-            st.markdown("조달청 원본 데이터에서 세오의 실적을 **계약 종류별**로 쪼개본 결과입니다. (MAS 6.4억 확인용)")
+            st.markdown("조달청 원본 데이터에서 세오의 실적을 **계약 종류별**로 쪼개본 결과입니다.")
             seo_sum = seo_df.groupby('계약종류_상세')['금액'].sum().reset_index()
             st.dataframe(seo_sum.style.format({'금액': '{:,.0f} 원'}), hide_index=True)
         else:
