@@ -28,13 +28,13 @@ EXCLUDE_ITEMS = [
 ]
 
 try:
-    # 💡 네가 준 CSV 파일에서 사업자등록번호와 업체명 매칭 딕셔너리 생성
-    df_target = pd.read_csv(TARGET_FILE, encoding='utf-8-sig')
+    # 💡 [핵심 버그 수정] 위에 쓸데없는 4줄(제목, 생성자 등)을 건너뛰고(skiprows=4) 5번째 줄부터 헤더로 읽음!
+    df_target = pd.read_csv(TARGET_FILE, encoding='utf-8-sig', skiprows=4)
     df_target['사업자등록번호'] = df_target['사업자등록번호'].astype(str).str.replace('-', '').str.strip()
     TARGET_MAP = dict(zip(df_target['사업자등록번호'], df_target['계약업체']))
     print(f"✅ 타겟 업체 {len(TARGET_MAP)}개 로드 완료! (사업자등록번호 기준 철통 필터링 준비)")
 except Exception as e:
-    print(f"🚨 타겟 업체 파일({TARGET_FILE})을 찾을 수 없거나 에러가 발생했습니다: {e}")
+    print(f"🚨 타겟 업체 파일({TARGET_FILE}) 로드 에러: {e}")
     exit()
 
 # --- 2. 통합 파이프라인 (사업자번호 필터링 + MAS/우수조달 완벽 분리) ---
@@ -48,7 +48,7 @@ def unified_data_parser(df_raw, target_month=None, is_api=False):
     if '사업자등록번호' not in df.columns: return pd.DataFrame() # 사업자번호 없으면 스킵
     
     # 💡 1차 필터: 사업자등록번호가 우리가 가진 53개 목록에 있는 것만 통과!
-    df['사업자등록번호'] = df['사업자등록번호'].astype(str).str.replace('-', '').str.strip()
+    df['사업자등록번호'] = df['사업자등록번호'].astype(str).str.replace('-', '').str.replace('.0', '', regex=True).str.strip()
     df = df[df['사업자등록번호'].isin(TARGET_MAP.keys())].copy()
     if df.empty: return pd.DataFrame()
 
@@ -124,7 +124,8 @@ for file, target_month in file_month_map.items():
                         dfs.append(clean_df)
                         print(f"  - {file} ({target_month}) : {len(clean_df)}건 추출")
                     break
-            except: pass
+            except: 
+                pass
 
 # --- 4. 새 API 키로 4월 20일 이후 실적 싹쓸이! ---
 now = datetime.now() + timedelta(hours=9)
@@ -151,7 +152,8 @@ for bgn, end in date_ranges:
                     print("  🚨 API 트래픽 한도 초과! (내일 다시 시도하세요)")
                     break
                 time.sleep(3)
-            except: time.sleep(3)
+            except: 
+                time.sleep(3)
         
         if not success: break
         
@@ -170,11 +172,12 @@ for bgn, end in date_ranges:
             if page * 500 >= total: break
             page += 1
             time.sleep(1.5)
-        except: break
+        except: 
+            break
 
 if all_new_data:
     df_api_raw = pd.DataFrame(all_new_data)
-    df_api_clean = unified_data_parser(df_api_raw, is_api=True) # API는 무조건 프리패스 등업!
+    df_api_clean = unified_data_parser(df_api_raw, is_api=True)
     if not df_api_clean.empty:
         dfs.append(df_api_clean)
         print(f"  ✅ API 신규 타겟 실적: {len(df_api_clean)}건 추출 완료!")
@@ -185,10 +188,10 @@ else:
 if dfs:
     df_master = pd.concat(dfs, ignore_index=True)
     
-    # 💡 가장 깐깐한 중복 제거 (납품요구번호 + 금액이 같으면 하나만 남김, 단 API 최신 데이터를 남김)
+    # 중복 제거 (납품요구번호 + 금액 기준)
     df_master = df_master.drop_duplicates(subset=['납품요구번호', '금액'], keep='last')
     
-    # 제외품목(알맹이 없는 스피커, 마이크 등) 필터링
+    # 제외품목 필터링
     pattern = '|'.join(EXCLUDE_ITEMS)
     df_master = df_master[~df_master['물품분류명'].astype(str).str.contains(pattern, na=False, regex=True)]
     
