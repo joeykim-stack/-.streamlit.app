@@ -61,8 +61,8 @@ def normalize_corp_name(name):
 
 TARGET_MAP = {normalize_corp_name(comp): comp for comp in TARGET_COMPANIES}
 
-# --- 3. 통합 파이프라인 (🔥 수동입력 절대 존중 & 추론 엔진) ---
-def unified_data_parser(df_raw, target_month=None):
+# --- 3. 통합 파이프라인 (🔥 API 프리패스 완벽 복원) ---
+def unified_data_parser(df_raw, target_month=None, is_api=False):
     if df_raw is None or df_raw.empty: return pd.DataFrame()
     df = df_raw.copy()
 
@@ -110,24 +110,30 @@ def unified_data_parser(df_raw, target_month=None):
             df['월'] = date_clean.str[4:6].apply(lambda x: f"{int(x)}월" if str(x).isdigit() else "4월")
         else: df['월'] = "5월"
 
-    # 💡 [핵심 V88] 사용자의 엑셀 수동 입력을 최우선으로 보호하는 로직
     if 'MAS여부' in df.columns:
         df['USER_MAS'] = df['MAS여부'].fillna('').astype(str).str.strip().str.upper()
     else:
         df['USER_MAS'] = ''
 
+    # 💡 [핵심 V89] API 프리패스와 엑셀 보호막을 동시에 적용!
     def assign_mas(row):
-        # 1. 엑셀의 수동 입력값 절대 존중 (API가 덮어쓰는 것 원천 차단)
+        # 1. 엑셀의 수동 입력값 절대 존중 (최우선)
         if row['USER_MAS'] == 'Y': return 'Y', 'MAS (엑셀 수동입력)'
         if row['USER_MAS'] == 'N': return 'N', '우수조달/일반 (엑셀 수동입력)'
         
-        # 2. 수동 입력이 없는 경우 (API 실시간 데이터 등) 텍스트 추론
+        # 2. 텍스트 추론 (우수, 혁신 등이 있으면 가차 없이 강등)
         text = ' '.join([str(v) for v in row.values]).upper()
-        if any(k in text for k in ['우수', '혁신', '총액', '일반']): return 'N', '우수조달/일반 (자동추론)'
+        if any(k in text for k in ['우수', '혁신', '총액', '일반']): 
+            return 'N', '우수조달/일반 (자동추론)'
+            
+        # 3. 🔥 부활한 API 실시간 데이터 프리패스권!
+        if is_api: 
+            return 'Y', 'MAS (API 실시간)'
+        
+        # 4. 일반 엑셀 데이터의 텍스트 추론
         if any(k in text for k in ['다수공급자', 'MAS']): return 'Y', 'MAS (다수공급자 자동추론)'
         if '제3자' in text: return 'Y', 'MAS (제3자 자동추론)'
         
-        # 명확한 단어가 전혀 없으면 보수적으로 N (과대계상 방지)
         return 'N', '기타/미상'
 
     res = df.apply(assign_mas, axis=1)
@@ -136,7 +142,7 @@ def unified_data_parser(df_raw, target_month=None):
 
     return df[['업체명', '물품분류명', '금액', '납품요구번호', '월', 'MAS여부', '계약종류_상세']]
 
-# 💡 엑셀 데이터 로드 (오직 사용자의 수동 파일만)
+# 💡 엑셀 데이터 로드 (is_api=False)
 @st.cache_data(ttl=3600)
 def load_historical_data_raw():
     dfs = []
@@ -149,11 +155,11 @@ def load_historical_data_raw():
                 if len(temp_df.columns) > 2: df = temp_df; break
             except: pass
         if df is not None:
-            clean_df = unified_data_parser(df, target_month=target_month)
+            clean_df = unified_data_parser(df, target_month=target_month, is_api=False)
             if not clean_df.empty: dfs.append(clean_df)
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
-# 💡 API 데이터 및 캐시 로드
+# 💡 API 데이터 및 캐시 로드 (is_api=True)
 @st.cache_data(ttl=600)
 def fetch_api_data_raw():
     now = get_now_kst()
@@ -161,7 +167,7 @@ def fetch_api_data_raw():
     
     RAW_KEY = "d6a789992823ed502e65039680f537b3db0da665bcb00e41330ce78a7c07f466"
     BASE_URL = "http://apis.data.go.kr/1230000/at/ShoppingMallPrdctInfoService/getDlvrReqInfoList"
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36'}
+    headers = {'User-Agent': 'Mozilla/5.0'}
 
     date_ranges = [("20260420", "20260430"), ("20260501", safe_end_date.strftime("%Y%m%d"))]
     all_new_data = []
@@ -207,9 +213,9 @@ def fetch_api_data_raw():
     df_api_clean = pd.DataFrame()
     if all_new_data:
         df_api_raw = pd.DataFrame(all_new_data)
-        df_api_clean = unified_data_parser(df_api_raw)
+        # 🔥 API 데이터는 무조건 is_api=True 로 넘겨서 프리패스를 받게 함!
+        df_api_clean = unified_data_parser(df_api_raw, is_api=True)
 
-    # API 캐시 시스템 (API가 죽어도 이전 실시간 데이터는 보존)
     cache_file = "api_data_cache.csv"
     if os.path.exists(cache_file):
         old_cache = pd.read_csv(cache_file, encoding='utf-8-sig')
@@ -232,8 +238,6 @@ def get_processed_data_raw():
         df_api, api_msg = fetch_api_data_raw()
     
     if not df_api.empty and not df_excel.empty:
-        # 🚨 [치명적 버그 해결] API 데이터가 엑셀의 '수동 MAS 여부'를 덮어쓰는 것을 원천 차단!
-        # 엑셀에 이미 존재하는 납품요구번호는 API 데이터에서 과감히 버림 (엑셀이 왕이다!)
         existing_orders = set(df_excel['납품요구번호'].unique())
         df_api_new = df_api[~df_api['납품요구번호'].isin(existing_orders)]
         df_total = pd.concat([df_excel, df_api_new], ignore_index=True)
@@ -248,7 +252,7 @@ def get_processed_data_raw():
 df_total, api_msg = get_processed_data_raw()
 
 # --- 7. UI ---
-st.markdown(f"<div class='main-title'>🏆 조달청 통합 대시보드 v88.0 (엑셀 철통 방어판)</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='main-title'>🏆 조달청 통합 대시보드 v89.0 (프리패스 완전 복구판)</div>", unsafe_allow_html=True)
 col_head1, col_head2 = st.columns([5, 2])
 with col_head1: st.markdown(f"<div class='update-time'>🕒 상태: {api_msg}</div>", unsafe_allow_html=True)
 with col_head2: 
@@ -256,7 +260,7 @@ with col_head2:
         st.cache_data.clear() 
         try:
             if os.path.exists("api_data_cache.csv"):
-                os.remove("api_data_cache.csv") # 악성 캐시 물리적 삭제!
+                os.remove("api_data_cache.csv")
         except: pass
         st.rerun()
 
@@ -418,6 +422,6 @@ if selected_items and not df_total.empty:
 
     st.markdown("<br><br>", unsafe_allow_html=True)
     board_df_mas = df_f[df_f['MAS여부'] == 'Y'].copy()
-    render_ranking_board(board_df_mas, "🏢 순수 MAS 전용 실적 랭킹", show_cnt, 'sort_mas', 'dl_mas', 'Greens')
+    render_ranking_board(board_df_mas, "🏢 순수 MAS(다수공급자/제3자단가) 전용 실적 랭킹", show_cnt, 'sort_mas', 'dl_mas', 'Greens')
 
 st.markdown("<br><center style='color:gray;'>Copyright(C) 2026 Joey Kim. Data from Public Data Portal.</center>", unsafe_allow_html=True)
