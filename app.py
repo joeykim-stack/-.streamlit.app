@@ -61,8 +61,8 @@ def normalize_corp_name(name):
 
 TARGET_MAP = {normalize_corp_name(comp): comp for comp in TARGET_COMPANIES}
 
-# --- 3. 통합 파이프라인 (🔥 API 프리패스 + 엑셀 깐깐 검사 투트랙!) ---
-def unified_data_parser(df_raw, target_month=None, is_api=False):
+# --- 3. 통합 파이프라인 (🔥 수동입력 절대 존중 & 추론 엔진) ---
+def unified_data_parser(df_raw, target_month=None):
     if df_raw is None or df_raw.empty: return pd.DataFrame()
     df = df_raw.copy()
 
@@ -110,45 +110,33 @@ def unified_data_parser(df_raw, target_month=None, is_api=False):
             df['월'] = date_clean.str[4:6].apply(lambda x: f"{int(x)}월" if str(x).isdigit() else "4월")
         else: df['월'] = "5월"
 
-    # 💡 [핵심] 투트랙 MAS 판독 엔진
-    if is_api:
-        # API 출신은 조달청 쇼핑몰에서 바로 온 것이므로 무조건 MAS(Y) 프리패스! (증발 문제 해결)
-        df['MAS여부_최종'] = 'Y' 
-        df['계약종류_상세'] = 'MAS (API 실시간)'
-    else:
-        # 엑셀 출신은 기본적으로 N으로 두고 깐깐하게 검사!
-        df['MAS여부_최종'] = 'N' 
-        df['계약종류_상세'] = '우수조달/일반경쟁'
-
-    # 수동입력 존중
+    # 💡 [핵심 V88] 사용자의 엑셀 수동 입력을 최우선으로 보호하는 로직
     if 'MAS여부' in df.columns:
-        user_mas = df['MAS여부'].astype(str).str.strip().str.upper()
-        df.loc[user_mas == 'Y', 'MAS여부_최종'] = 'Y'
-        df.loc[user_mas == 'Y', '계약종류_상세'] = 'MAS (수동입력)'
+        df['USER_MAS'] = df['MAS여부'].fillna('').astype(str).str.strip().str.upper()
+    else:
+        df['USER_MAS'] = ''
 
-    # 텍스트 쌍끌이 검사
-    str_cols = df.select_dtypes(include=['object', 'string']).columns
-    if len(str_cols) > 0:
-        all_text = df[str_cols].apply(lambda row: ' '.join(row.fillna('').astype(str)), axis=1)
+    def assign_mas(row):
+        # 1. 엑셀의 수동 입력값 절대 존중 (API가 덮어쓰는 것 원천 차단)
+        if row['USER_MAS'] == 'Y': return 'Y', 'MAS (엑셀 수동입력)'
+        if row['USER_MAS'] == 'N': return 'N', '우수조달/일반 (엑셀 수동입력)'
         
-        pure_mas = all_text.str.contains('다수공급자|MAS|mas', case=False, regex=True)
-        je3 = all_text.str.contains('제3자', regex=True)
-        usu = all_text.str.contains('우수|혁신|총액|일반', regex=True)
-        je3_mas = je3 & ~usu
-
-        # 합격자 등업 (API는 이미 Y지만 확실히 명찰 달아줌)
-        df.loc[pure_mas | je3_mas, 'MAS여부_최종'] = 'Y'
-        df.loc[pure_mas | je3_mas, '계약종류_상세'] = 'MAS (다수공급자/제3자단가)'
+        # 2. 수동 입력이 없는 경우 (API 실시간 데이터 등) 텍스트 추론
+        text = ' '.join([str(v) for v in row.values]).upper()
+        if any(k in text for k in ['우수', '혁신', '총액', '일반']): return 'N', '우수조달/일반 (자동추론)'
+        if any(k in text for k in ['다수공급자', 'MAS']): return 'Y', 'MAS (다수공급자 자동추론)'
+        if '제3자' in text: return 'Y', 'MAS (제3자 자동추론)'
         
-        # 🚨 [세오 19억 방어] 우수/혁신/총액 글자가 있으면 출신 불문 무조건 강등 (N)!
-        df.loc[usu, 'MAS여부_최종'] = 'N'
-        df.loc[usu, '계약종류_상세'] = '우수조달/일반경쟁'
+        # 명확한 단어가 전혀 없으면 보수적으로 N (과대계상 방지)
+        return 'N', '기타/미상'
 
-    df['MAS여부'] = df['MAS여부_최종']
+    res = df.apply(assign_mas, axis=1)
+    df['MAS여부'] = [x[0] for x in res]
+    df['계약종류_상세'] = [x[1] for x in res]
 
     return df[['업체명', '물품분류명', '금액', '납품요구번호', '월', 'MAS여부', '계약종류_상세']]
 
-# 💡 엑셀 데이터 캐싱 (1시간)
+# 💡 엑셀 데이터 로드 (오직 사용자의 수동 파일만)
 @st.cache_data(ttl=3600)
 def load_historical_data_raw():
     dfs = []
@@ -161,20 +149,11 @@ def load_historical_data_raw():
                 if len(temp_df.columns) > 2: df = temp_df; break
             except: pass
         if df is not None:
-            clean_df = unified_data_parser(df, target_month=target_month, is_api=False) # 엑셀은 깐깐하게
+            clean_df = unified_data_parser(df, target_month=target_month)
             if not clean_df.empty: dfs.append(clean_df)
-            
-    # API 가상 DB 로딩 (이미 파싱된 상태)
-    api_cache_file = "api_data_cache.csv"
-    if os.path.exists(api_cache_file):
-        try:
-            api_df = pd.read_csv(api_cache_file, encoding='utf-8-sig')
-            if not api_df.empty: dfs.append(api_df)
-        except: pass
-        
     return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
-# 💡 API 데이터 캐싱 (10분)
+# 💡 API 데이터 및 캐시 로드
 @st.cache_data(ttl=600)
 def fetch_api_data_raw():
     now = get_now_kst()
@@ -182,7 +161,7 @@ def fetch_api_data_raw():
     
     RAW_KEY = "d6a789992823ed502e65039680f537b3db0da665bcb00e41330ce78a7c07f466"
     BASE_URL = "http://apis.data.go.kr/1230000/at/ShoppingMallPrdctInfoService/getDlvrReqInfoList"
-    headers = {'User-Agent': 'Mozilla/5.0'}
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36'}
 
     date_ranges = [("20260420", "20260430"), ("20260501", safe_end_date.strftime("%Y%m%d"))]
     all_new_data = []
@@ -201,12 +180,12 @@ def fetch_api_data_raw():
                     if res.status_code == 200:
                         success = True; break 
                     elif res.status_code == 429:
-                        if attempt == 2: return pd.DataFrame(), f"🚨 일일 트래픽 한도 초과! (기존 데이터만 표시됨)"
+                        if attempt == 2: return pd.DataFrame(), f"🚨 API 트래픽 초과 (기존 캐시 활용)"
                         time.sleep(5) 
                     else: time.sleep(3) 
                 except: time.sleep(3)
                     
-            if not success: return pd.DataFrame(), f"🚨 통신 불안정 (잠시 후 새로고침 하세요)"
+            if not success: return pd.DataFrame(), f"🚨 통신 불안정 (기존 캐시 활용)"
             
             try:
                 root = ET.fromstring(res.content)
@@ -225,37 +204,43 @@ def fetch_api_data_raw():
                 time.sleep(2) 
             except Exception as e: return pd.DataFrame(), f"🚨 파싱 에러: {str(e)}"
 
-    if not all_new_data: return pd.DataFrame(), f"🔵 4/20 이후 신규 실적 없음"
-        
-    try:
+    df_api_clean = pd.DataFrame()
+    if all_new_data:
         df_api_raw = pd.DataFrame(all_new_data)
-        # 💡 API 데이터는 무조건 프리패스 (is_api=True)
-        df_api_clean = unified_data_parser(df_api_raw, is_api=True)
-        
-        if df_api_clean.empty: return pd.DataFrame(), f"🔵 타겟 업체 신규 실적 없음"
-        
-        cache_file = "api_data_cache.csv"
-        if os.path.exists(cache_file):
-            old_cache = pd.read_csv(cache_file, encoding='utf-8-sig')
+        df_api_clean = unified_data_parser(df_api_raw)
+
+    # API 캐시 시스템 (API가 죽어도 이전 실시간 데이터는 보존)
+    cache_file = "api_data_cache.csv"
+    if os.path.exists(cache_file):
+        old_cache = pd.read_csv(cache_file, encoding='utf-8-sig')
+        if not df_api_clean.empty:
             combined_cache = pd.concat([old_cache, df_api_clean]).drop_duplicates(subset=['납품요구번호', '물품분류명', '금액'], keep='last')
             combined_cache.to_csv(cache_file, index=False, encoding='utf-8-sig')
+            return combined_cache, f"🟢 실시간 데이터 수집 완료!"
         else:
+            return old_cache, f"🔵 신규 실적 없음 (캐시 로드됨)"
+    else:
+        if not df_api_clean.empty:
             df_api_clean.to_csv(cache_file, index=False, encoding='utf-8-sig')
-            
-        return df_api_clean, f"🟢 실시간 데이터 수집 완료! (신규 실적 추출)"
-    except Exception as e: return pd.DataFrame(), f"🚨 파이프라인 에러: {str(e)}"
+            return df_api_clean, f"🟢 실시간 데이터 수집 완료!"
+        else:
+            return pd.DataFrame(), f"🔵 4/20 이후 신규 실적 없음"
 
 def get_processed_data_raw():
-    df_hist = load_historical_data_raw()
-    with st.spinner('⏳ 실시간 데이터를 확인 중입니다... (약 30초 소요)'):
+    df_excel = load_historical_data_raw()
+    with st.spinner('⏳ 실시간 데이터를 확인 중입니다... (약 30초)'):
         df_api, api_msg = fetch_api_data_raw()
     
-    if not df_api.empty and not df_hist.empty:
-        df_total = pd.concat([df_hist, df_api], ignore_index=True)
-    else: df_total = df_api if not df_api.empty else df_hist
+    if not df_api.empty and not df_excel.empty:
+        # 🚨 [치명적 버그 해결] API 데이터가 엑셀의 '수동 MAS 여부'를 덮어쓰는 것을 원천 차단!
+        # 엑셀에 이미 존재하는 납품요구번호는 API 데이터에서 과감히 버림 (엑셀이 왕이다!)
+        existing_orders = set(df_excel['납품요구번호'].unique())
+        df_api_new = df_api[~df_api['납품요구번호'].isin(existing_orders)]
+        df_total = pd.concat([df_excel, df_api_new], ignore_index=True)
+    else: 
+        df_total = df_api if not df_api.empty else df_excel
 
     if not df_total.empty:
-        df_total = df_total.drop_duplicates(subset=['납품요구번호', '물품분류명', '금액'], keep='last')
         pattern = '|'.join(EXCLUDE_ITEMS)
         df_total = df_total[~df_total['물품분류명'].astype(str).str.contains(pattern, na=False, regex=True)]
     return df_total, api_msg
@@ -263,11 +248,10 @@ def get_processed_data_raw():
 df_total, api_msg = get_processed_data_raw()
 
 # --- 7. UI ---
-st.markdown(f"<div class='main-title'>🏆 조달청 통합 대시보드 v87.0 (투트랙 프리패스판)</div>", unsafe_allow_html=True)
+st.markdown(f"<div class='main-title'>🏆 조달청 통합 대시보드 v88.0 (엑셀 철통 방어판)</div>", unsafe_allow_html=True)
 col_head1, col_head2 = st.columns([5, 2])
 with col_head1: st.markdown(f"<div class='update-time'>🕒 상태: {api_msg}</div>", unsafe_allow_html=True)
 with col_head2: 
-    # 🚨 [초강력 소각 버튼] 어제 잘못 저장된 가상 DB까지 하드디스크에서 싹 지웁니다!
     if st.button("🔄 즉시 새로고침 (메모리 완전 초기화)", use_container_width=True): 
         st.cache_data.clear() 
         try:
@@ -434,6 +418,6 @@ if selected_items and not df_total.empty:
 
     st.markdown("<br><br>", unsafe_allow_html=True)
     board_df_mas = df_f[df_f['MAS여부'] == 'Y'].copy()
-    render_ranking_board(board_df_mas, "🏢 순수 MAS(다수공급자/실시간) 전용 실적 랭킹", show_cnt, 'sort_mas', 'dl_mas', 'Greens')
+    render_ranking_board(board_df_mas, "🏢 순수 MAS 전용 실적 랭킹", show_cnt, 'sort_mas', 'dl_mas', 'Greens')
 
 st.markdown("<br><center style='color:gray;'>Copyright(C) 2026 Joey Kim. Data from Public Data Portal.</center>", unsafe_allow_html=True)
