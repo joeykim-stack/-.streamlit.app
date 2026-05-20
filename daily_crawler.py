@@ -8,10 +8,9 @@ import os
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-print("🤖 [오토 머지 봇 가동] 조달청 신규 실적 수집 및 Master DB 업데이트 시작...\n")
+print("🤖 [오토 머지 봇 V2.2] 조달청 신규 실적 수집 및 Master DB 업데이트 시작...\n")
 
 # --- 1. 설정 ---
-# 💡 중찬이의 실시간 V5 API 인증키
 API_KEY = "df5a1c97ab56593d5e99889ae1c030bfe0b5e9d924ffba9bae3712c8bb1ad75c" 
 TARGET_FILE = "target_companies.csv"
 MASTER_DB_FILE = "Master_DB.csv"
@@ -52,7 +51,8 @@ except Exception as e:
     exit()
 
 # --- 3. 조달청 API 호출 ---
-BASE_URL = "http://apis.data.go.kr/1230000/at/ShoppingMallPrdctInfoService05/getDlvrReqInfoList"
+# 💡 [핵심 버그 수정] 주소에서 '05' 제거! 진짜 열려있는 대문으로 접속.
+BASE_URL = "http://apis.data.go.kr/1230000/at/ShoppingMallPrdctInfoService/getDlvrReqInfoList"
 headers = {'User-Agent': 'Mozilla/5.0'}
 all_new_data = []
 
@@ -121,7 +121,6 @@ if all_new_data:
                 'dlvrReqAmt': '전체계약금액'
             })
             
-            # 필요한 열 포맷 정리
             if '전체계약금액' in df_target_only.columns:
                 df_target_only['전체계약금액'] = pd.to_numeric(df_target_only['전체계약금액'], errors='coerce').fillna(0)
             
@@ -129,12 +128,10 @@ if all_new_data:
                 df_target_only['일자'] = df_target_only['일자'].astype(str).str.replace('-', '').str[:8]
                 df_target_only['월'] = df_target_only['일자'].str[4:6].apply(lambda x: f"{int(x)}월" if x.isdigit() else "미상")
 
-            # 💡 [핵심] 기존 Master_DB.csv를 열어서 밑에다 찰싹 이어붙임!
             if os.path.exists(MASTER_DB_FILE):
                 df_master = pd.read_csv(MASTER_DB_FILE, encoding='utf-8-sig', dtype=str)
                 df_combined = pd.concat([df_master, df_target_only], ignore_index=True)
                 
-                # 만약 중복 수집됐다면 제거 (납품요구번호+금액 기준)
                 if '납품요구번호' in df_combined.columns and '전체계약금액' in df_combined.columns:
                     df_combined = df_combined.drop_duplicates(subset=['납품요구번호', '물품분류명', '전체계약금액'], keep='last')
                 
