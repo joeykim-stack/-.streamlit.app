@@ -3,70 +3,52 @@ import pandas as pd
 from supabase import create_client
 import os
 
-# 1. 페이지 설정
-st.set_page_config(layout="wide", page_title="조달청 데이터 검증기")
-st.title("🔍 데이터 검증 및 분석 대시보드")
+st.set_page_config(layout="wide", page_title="최종 데이터 정합성 보정 시스템")
 
-# 2. Supabase 연결
+# 1. Supabase 연결
 @st.cache_resource
 def get_supabase():
     return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
 
 supabase = get_supabase()
 
-# 3. 데이터 로드 및 정제 엔진
+# 2. 강제 병합 및 정제 함수
 @st.cache_data(ttl=600)
-def load_analysis_data():
-    # 파일 로드
-    base_file = "Master_DB.csv"
-    base_df = pd.read_csv(base_file) if os.path.exists(base_file) else pd.DataFrame()
-    
-    # DB 데이터 로드
+def get_final_data():
+    # A. 파일 데이터 (진실의 원천)
+    if os.path.exists("Master_DB.csv"):
+        base_df = pd.read_csv("Master_DB.csv")
+    else:
+        base_df = pd.DataFrame()
+        
+    # B. DB 데이터 (실시간 보충)
     try:
         response = supabase.table("procurement_data").select("*").execute()
         db_df = pd.DataFrame(response.data)
     except:
         db_df = pd.DataFrame()
-    
-    # 데이터 합치기
-    df = pd.concat([base_df, db_df], ignore_index=True)
-    df = df.drop_duplicates(subset=['납품요구번호'], keep='last')
-    
-    # [데이터 정제]
-    df['업체명'] = df['업체명'].fillna("알수없음").astype(str).str.strip()
+
+    # C. 완전 병합 (파일 우선)
+    if not db_df.empty:
+        # DB 컬럼명을 파일 컬럼명에 맞춤
+        db_df = db_df.rename(columns={'납품요구번호': '납품요구번호', '전체계약금액': '전체계약금액'}) 
+        df = pd.concat([base_df, db_df], ignore_index=True)
+    else:
+        df = base_df
+
+    # D. 가장 중요한 정제 (중복 제거 & 금액 타입 고정)
+    df = df.drop_duplicates(subset=['납품요구번호'], keep='first') # 파일 데이터 우선 보존
     df['전체계약금액'] = pd.to_numeric(df['전체계약금액'], errors='coerce').fillna(0)
-    
-    # 테스트용 더미 데이터 강력 제거
-    trash_data = ["테스트업체", "테스트", "확인필요", "000", "알수없음"]
-    df = df[~df['업체명'].isin(trash_data)]
     
     return df
 
-# 4. 데이터 로드
-df = load_analysis_data()
+df = get_final_data()
 
-# 5. 정밀 검증 버튼
-if st.sidebar.button("세오 업체 데이터 정밀 분석"):
-    # 파일 데이터만 로드 (검증용)
-    if os.path.exists("Master_DB.csv"):
-        raw_base = pd.read_csv("Master_DB.csv")
-        raw_base['업체명'] = raw_base['업체명'].astype(str).str.strip()
-        seo_base = raw_base[raw_base['업체명'].str.contains("세오", na=False)]
-        st.write(f"### 📂 Master_DB 세오 결과")
-        st.write(f"건수: {len(seo_base)}, 합계: {seo_base['전체계약금액'].sum():,.0f}")
-    
-    # 통합 데이터 검증
-    seo_db = df[df['업체명'].str.contains("세오", na=False)]
-    st.write(f"### 📊 현재 통합 데이터 세오 결과")
-    st.write(f"건수: {len(seo_db)}, 합계: {seo_db['전체계약금액'].sum():,.0f}")
-    
-    st.write("---")
-    st.dataframe(seo_db)
+# 3. 결과 출력
+st.subheader("총 데이터 수 및 금액 검증")
+col1, col2 = st.columns(2)
+col1.metric("총 데이터 건수", f"{len(df):,} 건")
+col2.metric("총 계약금액 합계", f"{df['전체계약금액'].sum():,.0f} 원")
 
-# 6. 대시보드 테이블
-if not df.empty:
-    st.subheader("🏢 업체별 실적 요약 테이블")
-    total = df.groupby('업체명')['전체계약금액'].sum().sort_values(ascending=False).to_frame('총합계')
-    st.dataframe(total.style.format("{:,.0f}"), use_container_width=True)
-else:
-    st.warning("데이터가 없습니다.")
+# 업체별 실적 확인
+st.dataframe(df.groupby('업체명')['전체계약금액'].sum().sort_values(ascending=False))
