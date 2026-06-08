@@ -106,125 +106,45 @@ def load_hybrid_master():
     except:
         df = df_file
 
-    if df.empty:
-        return pd.DataFrame()
-
-    # C. 데이터 무결성 보정 및 마이너스(취소) 금액 살리기
-    df['전체계약금액'] = pd.to_numeric(df['전체계약금액'], errors='coerce').fillna(0)
-    df['업체명'] = df['업체명'].fillna("알수없음").astype(str).str.strip()
+    if not df.empty:
+    # 1. 월/분기 데이터를 범주형으로 강제 정의 (순서 고정)
+    df['월'] = df['DateTime'].dt.month
+    df['분기'] = df['DateTime'].dt.quarter
     
-    # 중복 제거 시 Master_DB(앞쪽 데이터)를 지켜 정합성 수치(54억) 보존
-    df = df.drop_duplicates(subset=['납품요구번호'], keep='first')
+    # 2. 피벗 테이블 생성 (월/분기별 합계)
+    # margins=True로 '총 합계' 자동 생성
+    pivot = df.pivot_table(
+        index='업체명', 
+        columns=['분기', '월'], 
+        values='전체계약금액', 
+        aggfunc='sum', 
+        fill_value=0
+    )
     
-    # 쓰레기 더미 제거
-    df = df[~df['업체명'].isin(["테스트업체", "테스트", "확인필요", "000", "알수없음"])]
-    
-    # 날짜 파싱 고도화 (20260515 및 문자열 대응)
-    df['일자_clean'] = df['일자'].astype(str).str.replace(r'\.0', '', regex=True).str.strip()
-    df['DateTime'] = pd.to_datetime(df['일자_clean'], format='%Y%m%d', errors='coerce')
-    
-    # 날짜 파싱 실패 데이터 보정
-    df['DateTime'] = df['DateTime'].fillna(pd.Timestamp('2026-01-01'))
-    
-    # 정렬 기준용 연월/분기 생성
-    df['연월'] = df['DateTime'].dt.strftime('%m월')
-    df['분기'] = df['DateTime'].dt.quarter.astype(str) + "분기"
-    
-    return df
-
-# 5. 사이드바 제어 보드 (IT 감각 디자인)
-with st.sidebar:
-    st.markdown("### 📡 실시간 데이터 최신화")
-    st.write("클릭 시 5월 18일 이후부터 오늘까지의 조달청 차분 실적을 동기화합니다.")
-    if st.button("🔄 실시간 차분 데이터 수집 실행"):
-        with st.spinner("조달청 V5 통신 게이트웨이 연결 중..."):
-            sync_count = run_realtime_sync()
-            if sync_count >= 0:
-                st.success(f"🎉 실시간 데이터 {sync_count}건 융합 성공!")
-                st.cache_data.clear() # 캐시 폭파 후 새로고침
-                st.rerun()
-                
-    st.markdown("---")
-    st.markdown("### 🛠️ 디버깅 필터")
-    show_raw = st.checkbox("통합 Raw 데이터셋 보기")
-
-# 데이터 프로세싱 구동
-total_df = load_hybrid_master()
-
-if not total_df.empty:
-    # 6. 상단 요약 매트릭스 보드 (임원 보고용 세련된 디자인)
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.markdown(f'<div class="metric-box"><b>📊 누적 분석 건수</b><br><span style="font-size:24px; font-weight:700; color:#2563EB;">{len(total_df):,} 건</span></div>', unsafe_allow_html=True)
-    with c2:
-        pure_plus = total_df[total_df['전체계약금액'] > 0]['전체계약금액'].sum()
-        st.markdown(f'<div class="metric-box"><b>💰 순수 계약 총액 (양수)</b><br><span style="font-size:24px; font-weight:700; color:#10B981;">{pure_plus:,.0f} 원</span></div>', unsafe_allow_html=True)
-    with c3:
-        net_total = total_df['전체계약금액'].sum()
-        st.markdown(f'<div class="metric-box"><b>📉 실상계 총액 (마이너스 반영)</b><br><span style="font-size:24px; font-weight:700; color:#EF4444;">{net_total:,.0f} 원</span></div>', unsafe_allow_html=True)
-
-    st.markdown("<br>", unsafe_allow_html=True)
-
-# 7. [핵심] 월별, 분기별, 총합계 계층 구조 피벗 테이블 빌드
-    st.subheader("🏢 업체별 분기/월별 정밀 실적 분석 (총 합계 순 정렬)")
-    
-    try:
-        # 피벗 테이블 구성
-        pivot_table = total_df.pivot_table(
-            index='업체명',
-            columns=['분기', '연월'],
-            values='전체계약금액',
-            aggfunc='sum',
-            fill_value=0,
-            margins=True,
-            margins_name='총 합계'
-        )
+    # 3. 분기별 합계 컬럼 추가 (1분기, 2분기, 3분기, 4분기)
+    for q in range(1, 5):
+        pivot[f'{q}분기 합계'] = pivot.loc[:, q].sum(axis=1) if q in pivot.columns else 0
         
-        # 컬럼명 평탄화 (튜플 제거)
-        new_cols = []
-        for col in pivot_table.columns:
-            if isinstance(col, tuple):
-                new_cols.append(f"{col[0]} {col[1]}".strip())
-            else:
-                new_cols.append(str(col))
-        pivot_table.columns = new_cols
-        
-        # 정렬 (총 합계 행을 제외하고 정렬 후 다시 결합)
-        if '총 합계' in pivot_table.index:
-            companies_only = pivot_table.drop('총 합계')
-            total_row = pivot_table.loc[['총 합계']]
-            sorted_companies = companies_only.sort_values(by='총 합계', ascending=False)
-            final_pivot = pd.concat([sorted_companies, total_row])
-        else:
-            final_pivot = pivot_table.sort_values(by='총 합계', ascending=False)
-            
-        # [에러 원천 차단] style 함수를 쓰지 않고, 데이터 자체를 '문자열(X,XXX원)'로 강제 변환!
-        display_df = final_pivot.copy()
-        for col in display_df.columns:
-            display_df[col] = display_df[col].apply(lambda x: f"{int(x):,}원" if pd.notnull(x) else "0원")
-            
-        # 렌더링 (아무 기교 없이 가장 안전하게 출력)
-        st.dataframe(display_df, use_container_width=True)
-
-        # 8. 대형 차트 (상위 10개사 성과)
-        st.markdown("<br>", unsafe_allow_html=True)
-        st.subheader("📊 상위 10개 리딩 기업 마켓 셰어 비교")
-        
-        # 차트용 데이터 (총 합계 행 제외)
-        if '총 합계' in final_pivot.index:
-            top_10 = final_pivot.drop('총 합계')['총 합계'].head(10)
-        else:
-            top_10 = final_pivot['총 합계'].head(10)
-            
-        st.bar_chart(top_10)
-
-    except Exception as e:
-        st.error(f"테이블 렌더링 중 치명적 오류: {e}")
-        st.warning("원본 데이터를 강제 출력합니다.")
-        st.dataframe(total_df, use_container_width=True)
-
-    # Raw 데이터 출력 세션
-    if show_raw:
-        st.markdown("---")
-        st.subheader("📋 융합 Raw 데이터 레이어")
-        st.dataframe(total_df[['사업자등록번호', '업체명', '납품요구번호', '일자', '전체계약금액', '계약종류_상세']], use_container_width=True)
+    # 4. 연간 총 합계 컬럼 추가
+    pivot['총 합계'] = pivot[[f'{q}분기 합계' for q in range(1, 5)]].sum(axis=1)
+    
+    # 5. 보기 좋게 정렬 (순서: 1월, 2월, 3월, 1분기 합계, 4월...)
+    cols_order = []
+    for q in range(1, 5):
+        for m in range(1, 4):
+            if (q, (q-1)*3 + m) in pivot.columns:
+                cols_order.append((q, (q-1)*3 + m))
+        cols_order.append(f'{q}분기 합계')
+    cols_order.append('총 합계')
+    
+    pivot = pivot[cols_order]
+    pivot = pivot.sort_values(by='총 합계', ascending=False)
+    
+    # 6. 최종 렌더링 (천 단위 콤마)
+    st.subheader("📋 업체별 월/분기 실적 종합 분석표")
+    st.dataframe(pivot.style.format("{:,.0f}원"), use_container_width=True)
+    
+    # 7. 다운로드 버튼
+    st.download_button("📥 전체 분석 데이터 다운로드", pivot.to_csv().encode('utf-8-sig'), "조달_실적_종합_분석.csv")
+else:
+    st.warning("데이터가 아직 없습니다.")
