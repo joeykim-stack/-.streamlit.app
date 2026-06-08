@@ -180,6 +180,19 @@ if not total_df.empty:
             margins_name='총 합계'
         )
         
+        # [버그 해결 핵심] 컬럼명 평탄화 (TypeError 원인인 튜플 컬럼을 1차원 문자열로 강제 변환)
+        new_cols = []
+        for col in pivot_table.columns:
+            if isinstance(col, tuple):
+                # margins=True로 생성된 ('총 합계', '') 같은 빈 튜플 처리
+                if col[1] == '':
+                    new_cols.append(str(col[0]))
+                else:
+                    new_cols.append(f"{col[0]} {col[1]}")
+            else:
+                new_cols.append(str(col))
+        pivot_table.columns = new_cols
+        
         # '총 합계' 열을 기준으로 상위 업체부터 랭킹 정렬
         companies_idx = pivot_table.index[:-1]
         total_row_idx = pivot_table.index[-1:]
@@ -187,26 +200,26 @@ if not total_df.empty:
         sorted_companies = pivot_table.loc[companies_idx].sort_values(by='총 합계', ascending=False)
         final_pivot = pd.concat([sorted_companies, pivot_table.loc[total_row_idx]])
         
-        # [수정됨] 절대 죽지 않는 안전한 데이터프레임 렌더링
-        try:
-            # 1순위: 예쁘게 콤마(,)와 '원'을 붙여서 렌더링 시도
-            st.dataframe(
-                final_pivot.style.format("{:,.0f}원", na_rep="0원").background_gradient(cmap="Blues", subset=pd.IndexSlice[companies_idx, :]), 
-                use_container_width=True
-            )
-        except TypeError:
-            # 2순위: 만약 문자열이 섞여서 TypeError가 나면, 뻗지 않고 그냥 생(Raw) 테이블로 출력!
-            st.warning("⚠️ 일부 데이터에 문자열이 섞여 있어 기본 포맷으로 출력합니다. (데이터 자체는 정상입니다)")
-            st.dataframe(final_pivot, use_container_width=True)
+        # UI 렌더링 (포맷팅 및 그라데이션)
+        st.dataframe(
+            final_pivot.style.format("{:,.0f}원").background_gradient(cmap="Blues", subset=pd.IndexSlice[companies_idx, :]), 
+            use_container_width=True
+        )
 
-    except Exception as e:
-        st.error(f"테이블 생성 중 알 수 없는 오류가 발생했습니다: {e}")
-
-    # 8. 대형 차트 (상위 10개사 성과)
-    st.markdown("<br>", unsafe_allow_html=True)
-    st.subheader("📊 상위 10개 리딩 기업 마켓 셰어 비교")
-    try:
+        # 8. 대형 차트 (상위 10개사 성과)
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.subheader("📊 상위 10개 리딩 기업 마켓 셰어 비교")
         top_10 = final_pivot.loc[companies_idx].head(10)['총 합계']
         st.bar_chart(top_10)
+
     except Exception as e:
-        st.error(f"차트 생성 오류 (데이터 확인 필요): {e}")
+        # 최악의 경우에도 앱이 뻗지 않게 막아주는 생명줄
+        st.error(f"테이블 렌더링 중 오류 발생: {e}")
+        st.warning("⚠️ 복잡한 포맷팅을 생략하고 원본 데이터를 강제 출력합니다.")
+        st.dataframe(total_df, use_container_width=True)
+
+    # Raw 데이터 출력 세션
+    if show_raw:
+        st.markdown("---")
+        st.subheader("📋 융합 Raw 데이터 레이어")
+        st.dataframe(total_df[['사업자등록번호', '업체명', '납품요구번호', '일자', '전체계약금액', '계약종류_상세']], use_container_width=True)
