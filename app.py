@@ -16,7 +16,7 @@ st.markdown("""
     .sub-title { font-size:16px; color:#4B5563; margin-bottom:25px; }
     .metric-box { background-color: #F3F4F6; padding: 15px; border-radius: 10px; border-left: 5px solid #2563EB; }
     </style>
-""", unsafe_index=True)
+""", unsafe_allow_html=True)
 
 st.markdown('<div class="main-title">🏆 조달청 실적 실시간 통합 분석 대시보드</div>', unsafe_allow_html=True)
 st.markdown('<div class="sub-title">Single Source of Truth (Master_DB) 기반 실시간 차분 융합 시스템</div>', unsafe_allow_html=True)
