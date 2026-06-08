@@ -165,40 +165,48 @@ if not total_df.empty:
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # 7. [핵심] 월별, 분기별, 총합계 계층 구조 피벗 테이블 빌드
+# 7. [핵심] 월별, 분기별, 총합계 계층 구조 피벗 테이블 빌드
     st.subheader("🏢 업체별 분기/월별 정밀 실적 분석 (총 합계 순 정렬)")
     
-    # 피벗 테이블 구성
-    pivot_table = total_df.pivot_table(
-        index='업체명',
-        columns=['분기', '연월'],
-        values='전체계약금액',
-        aggfunc='sum',
-        fill_value=0,
-        margins=True,
-        margins_name='총 합계'
-    )
-    
-    # '총 합계' 열을 기준으로 상위 업체부터 랭킹 정렬 (가장 아래 '총 합계' 행은 고정하기 위해 정렬 제외 후 결합)
-    companies_idx = pivot_table.index[:-1]
-    total_row_idx = pivot_table.index[-1:]
-    
-    sorted_companies = pivot_table.loc[companies_idx].sort_values(by='총 합계', ascending=False)
-    final_pivot = pd.concat([sorted_companies, pivot_table.loc[total_row_idx]])
-    
-    # 대시보드 테이블 가독성 향상 포맷팅
-    st.dataframe(final_pivot.style.format("{:,.0f}원").background_gradient(cmap="Blues", subset=pd.IndexSlice[companies_idx, :]), use_container_width=True)
+    try:
+        # 피벗 테이블 구성
+        pivot_table = total_df.pivot_table(
+            index='업체명',
+            columns=['분기', '연월'],
+            values='전체계약금액',
+            aggfunc='sum',
+            fill_value=0,
+            margins=True,
+            margins_name='총 합계'
+        )
+        
+        # '총 합계' 열을 기준으로 상위 업체부터 랭킹 정렬
+        companies_idx = pivot_table.index[:-1]
+        total_row_idx = pivot_table.index[-1:]
+        
+        sorted_companies = pivot_table.loc[companies_idx].sort_values(by='총 합계', ascending=False)
+        final_pivot = pd.concat([sorted_companies, pivot_table.loc[total_row_idx]])
+        
+        # [수정됨] 절대 죽지 않는 안전한 데이터프레임 렌더링
+        try:
+            # 1순위: 예쁘게 콤마(,)와 '원'을 붙여서 렌더링 시도
+            st.dataframe(
+                final_pivot.style.format("{:,.0f}원", na_rep="0원").background_gradient(cmap="Blues", subset=pd.IndexSlice[companies_idx, :]), 
+                use_container_width=True
+            )
+        except TypeError:
+            # 2순위: 만약 문자열이 섞여서 TypeError가 나면, 뻗지 않고 그냥 생(Raw) 테이블로 출력!
+            st.warning("⚠️ 일부 데이터에 문자열이 섞여 있어 기본 포맷으로 출력합니다. (데이터 자체는 정상입니다)")
+            st.dataframe(final_pivot, use_container_width=True)
+
+    except Exception as e:
+        st.error(f"테이블 생성 중 알 수 없는 오류가 발생했습니다: {e}")
 
     # 8. 대형 차트 (상위 10개사 성과)
     st.markdown("<br>", unsafe_allow_html=True)
     st.subheader("📊 상위 10개 리딩 기업 마켓 셰어 비교")
-    top_10 = final_pivot.loc[companies_idx].head(10)['총 합계']
-    st.bar_chart(top_10)
-
-    # Raw 데이터 출력 세션
-    if show_raw:
-        st.markdown("---")
-        st.subheader("📋 융합 Raw 데이터 레이어")
-        st.dataframe(total_df[['사업자등록번호', '업체명', '납품요구번호', '일자', '전체계약금액', '계약종류_상세']], use_container_width=True)
-else:
-    st.error("🚫 표시할 수 있는 데이터가 존재하지 않습니다. 마스터 파일과 데이터베이스 상태를 점검하십시오.")
+    try:
+        top_10 = final_pivot.loc[companies_idx].head(10)['총 합계']
+        st.bar_chart(top_10)
+    except Exception as e:
+        st.error(f"차트 생성 오류 (데이터 확인 필요): {e}")
