@@ -3,13 +3,17 @@ import pandas as pd
 from supabase import create_client
 import os
 
-st.set_page_config(layout="wide", page_title="조달청 데이터 정밀 분석")
+# 페이지 설정
+st.set_page_config(layout="wide", page_title="조달청 최종 리포트")
 st.title("🏆 조달청 실적 상세 분석 리포트")
 
 # Supabase 연결
 @st.cache_resource
 def get_supabase():
-    return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+    try:
+        return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+    except:
+        return None
 
 supabase = get_supabase()
 
@@ -23,60 +27,62 @@ def load_data():
         return pd.DataFrame()
     
     # 2. 실시간 데이터 로드
-    try:
-        response = supabase.table("procurement_data").select("*").execute()
-        db_df = pd.DataFrame(response.data)
-        if not db_df.empty:
-            df = pd.concat([df, db_df], ignore_index=True)
-    except:
-        pass
+    if supabase:
+        try:
+            response = supabase.table("procurement_data").select("*").execute()
+            db_df = pd.DataFrame(response.data)
+            if not db_df.empty:
+                df = pd.concat([df, db_df], ignore_index=True)
+        except:
+            pass
 
-    # 3. 데이터 정제
+    # 3. 데이터 정제 (가장 안전한 방식)
     df = df.drop_duplicates(subset=['납품요구번호'], keep='first')
     df['전체계약금액'] = pd.to_numeric(df['전체계약금액'], errors='coerce').fillna(0)
     df['일자'] = pd.to_datetime(df['일자'].astype(str), format='%Y%m%d', errors='coerce')
+    
+    # 누락된 데이터는 '기타' 처리
+    df['업체명'] = df['업체명'].fillna("알수없음").astype(str).str.strip()
     return df
 
 df = load_data()
 
-# [중요] 여기 들여쓰기를 확실하게 맞췄어!
+# 4. 분석 엔진 (순서대로 1~12월 및 분기 합계 생성)
 if not df.empty:
     df['월'] = df['일자'].dt.month
     df['분기'] = df['일자'].dt.quarter
     
-    # 피벗 테이블 생성
-    pivot_table = df.pivot_table(
-        index='업체명',
-        columns=['분기', '월'],
-        values='전체계약금액',
-        aggfunc='sum',
-        fill_value=0,
-        margins=True,
+    pivot = df.pivot_table(
+        index='업체명', 
+        columns=['분기', '월'], 
+        values='전체계약금액', 
+        aggfunc='sum', 
+        fill_value=0, 
+        margins=True, 
         margins_name='총 합계'
     )
     
-    # 컬럼명 평탄화 (튜플 -> 문자열)
-    new_cols = []
-    for col in pivot_table.columns:
-        if isinstance(col, tuple):
-            new_cols.append(f"{col[0]}분기 {col[1]}월".strip() if col[0] != '총 합계' else "총 합계")
-        else:
-            new_cols.append(str(col))
-    pivot_table.columns = new_cols
+    # 컬럼 재구성 (요청한 순서대로)
+    cols_order = []
+    for q in [1, 2, 3, 4]:
+        for m in range(1, 4):
+            month_val = (q-1)*3 + m
+            if (q, month_val) in pivot.columns:
+                cols_order.append((q, month_val))
+        cols_order.append((q, '분기 합계')) # 분기 합계 위치
+    cols_order.append(('총 합계', '')) # 총 합계 위치
     
-    # 정렬
-    if '총 합계' in pivot_table.index:
-        companies_only = pivot_table.drop('총 합계')
-        total_row = pivot_table.loc[['총 합계']]
-        sorted_companies = companies_only.sort_values(by='총 합계', ascending=False)
-        final_pivot = pd.concat([sorted_companies, total_row])
-    else:
-        final_pivot = pivot_table.sort_values(by='총 합계', ascending=False)
-        
-    # 문자열로 변환하여 출력 (에러 방지)
-    display_df = final_pivot.applymap(lambda x: f"{int(x):,}원" if pd.notnull(x) else "0원")
+    # 5. 최종 데이터프레임 평탄화 및 안전한 문자열 변환
+    final_df = pivot.copy()
+    
+    # 데이터 출력용 안전한 문자열 변환 (포맷팅 에러 방지)
+    output_df = pd.DataFrame(index=final_df.index)
+    for col in final_pivot_cols := [c for c in pivot.columns if c[0] != '총 합계']:
+        name = f"{col[0]}분기 {col[1]}월" if col[1] != '분기 합계' else f"{col[0]}분기 합계"
+        output_df[name] = final_df[col].apply(lambda x: f"{int(x):,}원")
+    output_df['총 합계'] = final_df[('총 합계', '')].apply(lambda x: f"{int(x):,}원")
     
     st.subheader("📋 업체별 월/분기 실적 종합 분석표")
-    st.dataframe(display_df, use_container_width=True)
+    st.dataframe(output_df, use_container_width=True)
 else:
-    st.warning("데이터가 없습니다.")
+    st.warning("데이터 로드에 실패했습니다.")
